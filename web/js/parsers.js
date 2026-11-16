@@ -44,8 +44,8 @@ export async function parseBoardFiles(files, keys = {}) {
   const head = latin1.decode(u8.subarray(0, Math.min(u8.length, 1 << 20)));
   const all = () => latin1.decode(u8);
 
-  if (ext === ".fz") return finish(await parseFZ(u8, keys.fz, FZ_PARITY, "FZ"), name, "ASUS FZ");
-  if (ext === ".cae") return finish(await parseFZ(u8, keys.cae, CAE_PARITY, "CAE"), name, "CAE");
+  if (ext === ".fz") return finish(await parseFZ(u8, keys.fz, FZ_PARITY, "FZ", parseKeyWords(keys.fzBuiltin || "")), name, "ASUS FZ");
+  if (ext === ".cae") return finish(await parseFZ(u8, keys.cae, CAE_PARITY, "CAE", parseKeyWords(keys.caeBuiltin || "")), name, "CAE");
   if (has(head, "GENCAD") && has(head, "$HEADER")) return finish(parseGenCAD(td8(u8)), name, "GenCAD");
   if (has(head, "|KIND=Protel_Advanced_PCB")) {
     if (has(head, "Binary")) throw new Error("This is a binary Altium PCB. Export it from Altium as ASCII (.PcbDoc ASCII) and open that.");
@@ -365,12 +365,13 @@ export async function inflate(u8) {
   catch (e) { if (!n) throw new Error("Decompression failed. The file is damaged, or the decryption key is wrong."); }
   const out = new Uint8Array(n); let o = 0; for (const c of chunks) { out.set(c, o); o += c.length; } return out;
 }
-async function parseFZ(u8, keyStr, parity, label) {
+async function parseFZ(u8, keyStr, parity, label, builtin) {
   let b = u8.slice();
   if (!(b[4] === 0x78 && (b[5] === 0x9c || b[5] === 0xda))) {
-    const key = parseKeyWords(keyStr);
+    let key = parseKeyWords(keyStr);
+    if (key.length && !checkRC6Key(key, parity)) throw new NeedKeyError(label.toLowerCase(), `The ${label} key in Settings isn't valid (it needs 44 words and fails the parity check). Check it and try again.`);
+    if (!key.length) key = builtin && checkRC6Key(builtin, parity) ? builtin : []; // built-in key when none is set
     if (!key.length) throw new NeedKeyError(label.toLowerCase(), `This ${label} file is encrypted. Add your ${label} key (44 hex words) in Settings, then open the file again.`);
-    if (!checkRC6Key(key, parity)) throw new NeedKeyError(label.toLowerCase(), `The ${label} key in Settings isn't valid (it needs 44 words and fails the parity check). Check it and try again.`);
     rc6Stream(b, key);
   }
   const N = b.length;

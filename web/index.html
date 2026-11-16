@@ -9,8 +9,9 @@
 <style>
 /* Layout: one-screen bench. Inspector | board | schematic | assistant. Dark-first: solder-mask greens, copper accent. */
 :root{
+  --accent-base:#e39250; /* set by [data-accent]; drives the accent in both themes */
   --bg:#0b1214; --rail:#10191c; --pane:#091013; --raise:#15232700; --line:#1f2f35; --line2:#2b4048;
-  --fg:#d5e0e2; --muted:#7f959a; --copper:#e39250; --copper-ink:#1b0f05; --copper-soft:#e392502a;
+  --fg:#d5e0e2; --muted:#7f959a; --copper:var(--accent-base); --copper-ink:#161008; --copper-soft:color-mix(in srgb,var(--accent-base) 17%,transparent);
   --ok:#5fd29a; --warn:#e8c45a; --bad:#f07070;
   --b-fill:#0e2427; --b-edge:#3d6b64; --b-part:#4b6e71; --b-pin:#b1bfc1; --b-gnd:#3a5056; --b-label:#9db4b6; --b-sel:#ffd39c; --b-pin-ink:#0a1315;
   --n0:#f09c52; --n1:#4ccae2; --n2:#ef6aa8; --n3:#a6dc54; --n4:#b394ff; --n5:#ead95a; --n6:#5fe0a8;
@@ -23,7 +24,7 @@
 @media (prefers-color-scheme: light){
   :root:not([data-theme="dark"]){
     --bg:#e7eeed; --rail:#f6f9f8; --pane:#dce5e4; --line:#c6d4d3; --line2:#afc2c1;
-    --fg:#132024; --muted:#4f6468; --copper:#b45c1a; --copper-ink:#fff6ee; --copper-soft:#b45c1a22;
+    --fg:#132024; --muted:#4f6468; --copper:color-mix(in srgb,var(--accent-base) 72%,#241300); --copper-ink:#fff6ee; --copper-soft:color-mix(in srgb,var(--accent-base) 20%,transparent);
     --ok:#127a4c; --warn:#8a6a00; --bad:#b42727;
     --b-fill:#cde0dc; --b-edge:#5a8d84; --b-part:#6b8c8d; --b-pin:#56676a; --b-gnd:#a7b9b8; --b-label:#2f4a49; --b-sel:#8a3a00; --b-pin-ink:#f2f7f6;
     --n0:#c45a10; --n1:#08869f; --n2:#c22c76; --n3:#4c8710; --n4:#6c4cd4; --n5:#977f00; --n6:#0f8458;
@@ -33,13 +34,19 @@
 }
 :root[data-theme="light"]{
   --bg:#e7eeed; --rail:#f6f9f8; --pane:#dce5e4; --line:#c6d4d3; --line2:#afc2c1;
-  --fg:#132024; --muted:#4f6468; --copper:#b45c1a; --copper-ink:#fff6ee; --copper-soft:#b45c1a22;
+  --fg:#132024; --muted:#4f6468; --copper:color-mix(in srgb,var(--accent-base) 72%,#241300); --copper-ink:#fff6ee; --copper-soft:color-mix(in srgb,var(--accent-base) 20%,transparent);
   --ok:#127a4c; --warn:#8a6a00; --bad:#b42727;
   --b-fill:#cde0dc; --b-edge:#5a8d84; --b-part:#6b8c8d; --b-pin:#56676a; --b-gnd:#a7b9b8; --b-label:#2f4a49; --b-sel:#8a3a00; --b-pin-ink:#f2f7f6;
   --n0:#c45a10; --n1:#08869f; --n2:#c22c76; --n3:#4c8710; --n4:#6c4cd4; --n5:#977f00; --n6:#0f8458;
   --ai-bg:#f1f6f5; --ai-user:#dfe9e8;
   color-scheme:light;
 }
+:root[data-accent="amber"]{--accent-base:#e6b325}
+:root[data-accent="blue"]{--accent-base:#4c9ff0}
+:root[data-accent="teal"]{--accent-base:#2fc4c0}
+:root[data-accent="green"]{--accent-base:#5bbf6a}
+:root[data-accent="violet"]{--accent-base:#9a86ff}
+:root[data-accent="rose"]{--accent-base:#ec6a92}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{background:var(--bg);color:var(--fg);font:14px/1.45 var(--f-ui);display:flex;flex-direction:column;overflow:hidden}
@@ -189,6 +196,19 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
 .field textarea{font-family:var(--f-mono);font-size:12px;min-height:70px;resize:vertical}
 .field .st{font-size:12px}
 .st.ok{color:var(--ok)} .st.bad{color:var(--bad)}
+.tag{font:600 9.5px/1.4 var(--f-ui);letter-spacing:.08em;text-transform:uppercase;border-radius:3px;padding:2px 5px;vertical-align:1px}
+.tag.good{background:color-mix(in srgb,var(--ok) 22%,transparent);color:var(--ok)}
+.tag.bad{background:color-mix(in srgb,var(--bad) 22%,transparent);color:var(--bad)}
+.statrow{display:flex;gap:6px;margin-bottom:8px}
+.statbtn{flex:1;height:28px;border:1px solid var(--line2);border-radius:5px;background:none;cursor:pointer;font-size:12.5px;font-weight:500;color:var(--muted);white-space:nowrap}
+.statbtn:hover{border-color:var(--copper)}
+.statbtn.on{color:var(--fg);border-color:var(--fg)}
+.statbtn.on.good{background:color-mix(in srgb,var(--ok) 20%,transparent);border-color:var(--ok);color:var(--ok)}
+.statbtn.on.bad{background:color-mix(in srgb,var(--bad) 20%,transparent);border-color:var(--bad);color:var(--bad)}
+.swatches{display:flex;gap:8px;flex-wrap:wrap}
+.sw{width:30px;height:30px;border-radius:50%;border:2px solid var(--line2);background:var(--s);cursor:pointer;padding:0}
+.sw:hover{transform:scale(1.08)}
+.sw[aria-pressed="true"]{border-color:var(--fg);box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--s)}
 @media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -272,18 +292,43 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
   <form method="dialog" id="setForm">
     <div class="dlg-h">Settings</div>
     <div class="dlg-b">
-      <label class="field"><span>Anthropic API key</span>
-        <input id="sKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
-        <small id="sKeyHint">Used only by the assistant. Stored on this PC in your user profile and sent only to api.anthropic.com.</small></label>
-      <label class="field"><span>Assistant model</span>
-        <select id="sModel">
-          <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (balanced, recommended)</option>
-          <option value="claude-opus-5-5">Claude Opus 5.5 (deepest reasoning)</option>
-          <option value="claude-haiku-5-5">Claude Haiku 5.5 (fastest)</option>
+      <div class="dlg-sec">Repair assistant</div>
+      <label class="field"><span>AI service</span>
+        <select id="sProvider">
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="openai">OpenAI (GPT)</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="openrouter">OpenRouter (many models)</option>
+          <option value="custom">Local or custom (OpenAI-compatible)</option>
         </select></label>
-      <label class="field"><span>ASUS FZ key</span>
-        <textarea id="sFz" spellcheck="false" placeholder="44 words, e.g. 0x12345678, 0x9abcdef0, …"></textarea>
-        <small>Needed only for encrypted .fz files. Same key format as OpenBoardView’s FZKey.</small><span class="st" id="sFzSt"></span></label>
+      <label class="field" id="sBaseWrap" hidden><span>Base URL</span>
+        <input id="sBase" spellcheck="false" placeholder="http://localhost:1234/v1">
+        <small>The OpenAI-compatible endpoint, e.g. LM Studio http://localhost:1234/v1 or Ollama http://localhost:11434/v1.</small></label>
+      <label class="field"><span id="sKeyLabel">API key</span>
+        <input id="sKey" type="password" autocomplete="off" spellcheck="false" placeholder="">
+        <small id="sKeyHint"></small></label>
+      <label class="field"><span>Model</span>
+        <input id="sModel" spellcheck="false" list="sModels" placeholder="model name">
+        <datalist id="sModels"></datalist>
+        <small id="sModelHint"></small></label>
+
+      <div class="dlg-sec">Appearance</div>
+      <label class="field"><span>Theme</span>
+        <div class="seg" id="sThemeSeg" role="group" aria-label="Theme">
+          <button type="button" data-mode="system" aria-pressed="true">System</button>
+          <button type="button" data-mode="light" aria-pressed="false">Light</button>
+          <button type="button" data-mode="dark" aria-pressed="false">Dark</button></div></label>
+      <label class="field"><span>Accent colour</span>
+        <div class="swatches" id="sAccent">
+          <button type="button" class="sw" data-accent="copper" title="Copper" style="--s:#e39250"></button>
+          <button type="button" class="sw" data-accent="amber" title="Amber" style="--s:#e6b325"></button>
+          <button type="button" class="sw" data-accent="blue" title="Blue" style="--s:#4c9ff0"></button>
+          <button type="button" class="sw" data-accent="teal" title="Teal" style="--s:#2fc4c0"></button>
+          <button type="button" class="sw" data-accent="green" title="Green" style="--s:#5bbf6a"></button>
+          <button type="button" class="sw" data-accent="violet" title="Violet" style="--s:#9a86ff"></button>
+          <button type="button" class="sw" data-accent="rose" title="Rose" style="--s:#ec6a92"></button></div></label>
+
+      <div class="dlg-sec">Decode keys</div>
       <label class="field"><span>XZZ key</span>
         <input id="sXzz" spellcheck="false" placeholder="16 hex digits">
         <small>Needed for XZZ .pcb files whose parts are DES-encrypted.</small><span class="st" id="sXzzSt"></span></label>

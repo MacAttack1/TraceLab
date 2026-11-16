@@ -11,14 +11,15 @@ You can inspect the board the user has open through tools:
 - view_schematic: an image of a schematic page or a zoomed crop around a name. Use this whenever wiring matters (what drives an enable pin, which MOSFET switches a rail, divider values, pull-ups), because extracted text loses the connections.
 - view_board: an image of the board view (optionally focused on a net or part).
 - highlight: select a net or part in the viewer so the user can see it.
-- get_readings: the user's diode-mode, voltage and resistance readings.
+- get_readings: the user's diode-mode, voltage and resistance readings for this board, and which nets they marked known-good or faulty.
+- known_readings: search every board the user has worked on for a net name, to compare against a known-good value measured before or to see where a rail has failed previously.
 
 How to work:
 - Ground every specific claim (designators, net names, pin numbers, values, page numbers) in tool results. Never invent a designator, net or value. If the files don't show something, say so and say how the user can measure or check it.
 - Look before you answer: for a rail or signal question, call get_net first, then view_schematic on the page that generates it.
 - Think like an experienced bench tech. Typical flow: visual inspection and liquid damage, then main input/battery rail for shorts (resistance and diode mode to ground), always-on rails (often named G3H, ALW, AON, S5, DSW or RTC), EC/SMC/PCH standby power, power button and enable chain, power-good signals, then sleep-state rails (S3/S0), CPU/GPU core, memory. Check the regulator's input, enable, feedback, bootstrap, switching node and output in that order.
 - For shorts: identify the rail, the parts on it and their locations, then suggest finding the hot component with voltage injection (current-limited, never above the rail's nominal voltage), a thermal camera, freeze spray or isopropyl/rosin, or by lifting inductors/jumpers to split the rail. Point out the rail's subnets and the series parts that can be lifted to isolate sections.
-- Interpret the user's readings. Diode-mode and resistance values vary by board, so describe typical ranges as typical, compare against similar rails on the same board when possible, and recommend comparing with a known-good board.
+- Interpret the user's readings. Diode-mode and resistance values vary by board, so describe typical ranges as typical, compare against similar rails on the same board, and call known_readings to compare against a known-good value the user logged on another board before guessing. When the user marks a net known-good or faulty, treat that as ground truth.
 - Mention safety where relevant: ESD, battery disconnection, current limits when injecting, hot air near plastic connectors and BGA underfill.
 
 Style:
@@ -36,9 +37,9 @@ const TOOLS = [
   { name: "view_schematic", description: "Image of a schematic page. With 'near', a zoomed crop around that name with its occurrences boxed in orange. Use this to read wiring, values and enable chains.", input_schema: { type: "object", properties: { page: { type: "integer", description: "1-based page number. Optional if 'near' is given (first page with a match)." }, near: { type: "string" }, occurrence: { type: "integer", description: "Which match of 'near' to centre on, 1-based. Default 1." } } } },
   { name: "view_board", description: "Image of the board viewer. With 'focus', selects that net or part first so it is highlighted (primary net orange, subnets in other colours, pins on the far side as dashed rings).", input_schema: { type: "object", properties: { focus: { type: "string" }, side: { type: "string", enum: ["top", "bottom"] } } } },
   { name: "highlight", description: "Select a net or part in the viewer so the user sees it on the board and schematic.", input_schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
-  { name: "get_readings", description: "All diode-mode, voltage and resistance readings the user has logged for this board, by net.", input_schema: { type: "object", properties: {} } },
+  { name: "get_readings", description: "All diode-mode, voltage and resistance readings the user has logged for the CURRENT board, by net, including which nets they marked known-good or faulty.", input_schema: { type: "object", properties: {} } },
+  { name: "known_readings", description: "Search the readings database across ALL boards the user has worked on for a net name, to compare the current board against a known-good value measured on another board, or to see where this rail has failed before. Returns board, net, good/bad label and values.", input_schema: { type: "object", properties: { net: { type: "string", description: "Net name or partial name to look up, e.g. PP3V3 or VCORE" }, status: { type: "string", enum: ["good", "bad"], description: "Optional: only known-good or only faulty readings" } }, required: ["net"] } },
 ];
-TOOLS[TOOLS.length - 1].cache_control = { type: "ephemeral" };
 
 const RAIL_RE = /^(PP|\+)|^V[A-Z0-9_]*$|\d+V\d*|\dP\d+V|VCC|VDD|VIN|VBUS|VBAT|DCIN|ADAPTER|BATT|_RTC|VCORE|VGFX|VDDQ|VTT/i;
 const prefix = (n) => (n.match(/^[A-Za-z]+/) || [""])[0].toUpperCase();
@@ -159,11 +160,22 @@ export function initAssistant(app) {
       return [{ type: "text", text: `${what}Board view, ${S.side === "B" ? "bottom side (mirrored)" : "top side"}. Primary net is orange; subnets use other colours; dashed rings are pins of highlighted nets on the other side; dark pins are ground.` }, { type: "image", source: { type: "base64", media_type: "image/png", data } }];
     },
     highlight({ name }) { const k = app.selectByName(name); return k ? `Selected ${k} ${name} in the viewer.` : `Nothing named "${name}".` + suggest(name); },
-    get_readings() { const rd = app.getReadings(); const k = Object.keys(rd); return k.length ? k.map((n) => fmtReading(n, rd[n])).join("\n") : "The user hasn't logged any readings for this board yet. They can add them in the net panel (diode mode, voltage, resistance to ground)."; },
+    get_readings() { const rd = app.getReadings(); const k = Object.keys(rd); return k.length ? k.map((n) => fmtReading(n, rd[n])).join("\n") : "The user hasn't logged any readings for this board yet. They can add them in the net panel (good/fault label, diode mode, voltage, resistance to ground)."; },
+    async known_readings({ net, status }) {
+      if (!app.hasBackend) return "The readings database needs the Trace Lab desktop app.";
+      const b = board();
+      try {
+        const qs = new URLSearchParams({ net: net || "" }); if (status) qs.set("status", status); if (b) qs.set("exclude", b.name);
+        const r = await app.api("/api/readings/search?" + qs.toString()); if (!r.ok) return "Couldn't search the readings database.";
+        const hits = await r.json();
+        if (!hits.length) return `No logged readings match "${net}"${status ? " (" + status + ")" : ""} on any board yet. Known-good values build up as the user marks nets.`;
+        return `Readings matching "${net}" across boards (most recent first):\n` + hits.map((h) => `${h.board} · ${h.net}${h.status ? " [" + (h.status === "good" ? "known good" : "fault") + "]" : ""}: ` + [h.diode && `diode ${h.diode}`, h.volts && `${h.volts} V`, h.ohms && `${h.ohms} Ω to GND`, h.note && `note: ${h.note}`].filter(Boolean).join(", ")).join("\n");
+      } catch (e) { return "Couldn't search the readings database: " + e.message; }
+    },
   };
-  function fmtReading(n, r) { return `${n}: ` + [r.diode && `diode ${r.diode}`, r.volts && `voltage ${r.volts} V`, r.ohms && `to GND ${r.ohms} Ω`, r.note && `note: ${r.note}`].filter(Boolean).join(", "); }
+  function fmtReading(n, r) { return `${n}: ` + [r.status && (r.status === "good" ? "KNOWN GOOD" : "FAULT"), r.diode && `diode ${r.diode}`, r.volts && `voltage ${r.volts} V`, r.ohms && `to GND ${r.ohms} Ω`, r.note && `note: ${r.note}`].filter(Boolean).join(", "); }
   const TOOL_LABEL = { board_overview: () => "Reading board overview", find: (i) => `Searching “${i.query || ""}”`, get_net: (i) => `Checking net ${i.name || ""}`, get_part: (i) => `Checking part ${i.name || ""}`,
-    read_schematic_text: (i) => `Reading schematic ${i.near ? "near " + i.near : "p." + (i.page || "")}`, view_schematic: (i) => `Viewing schematic ${i.near ? "at " + i.near : "p." + (i.page || "")}`, view_board: (i) => `Viewing board${i.focus ? " at " + i.focus : ""}`, highlight: (i) => `Highlighting ${i.name || ""}`, get_readings: () => "Reading your measurements" };
+    read_schematic_text: (i) => `Reading schematic ${i.near ? "near " + i.near : "p." + (i.page || "")}`, view_schematic: (i) => `Viewing schematic ${i.near ? "at " + i.near : "p." + (i.page || "")}`, view_board: (i) => `Viewing board${i.focus ? " at " + i.focus : ""}`, highlight: (i) => `Highlighting ${i.name || ""}`, get_readings: () => "Reading your measurements", known_readings: (i) => `Known readings for ${i.net || ""}` };
 
   /* ---------------- context + UI ---------------- */
   function contextBlock() {
@@ -181,7 +193,8 @@ export function initAssistant(app) {
       : sel.type === "net" ? [`Diagnose ${sel.name}`, `What generates ${sel.name} and what enables it?`, `${sel.name} is shorted to ground. How do I find the short?`, `What readings should ${sel.name} have?`]
       : sel.type === "part" ? [`What does ${sel.name} do?`, `How do I test ${sel.name}?`, `What powers ${sel.name}?`] : [`Where is ${sel.name} used?`];
     quick.innerHTML = busy ? "" : qs.map((t) => `<button type="button">${app.esc(t)}</button>`).join("");
-    $("#aiModel").textContent = (app.config.model || "").replace(/^claude-/, "").replace(/-(\d)-(\d)$/, " $1.$2");
+    const mdl = (app.config.model || "").replace(/^claude-/, "").replace(/-(\d)-(\d)$/, " $1.$2").replace(/^.*\//, "");
+    $("#aiModel").textContent = mdl;
   }
   quick.addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) send(b.textContent); });
   let boardId = null;
@@ -192,7 +205,8 @@ export function initAssistant(app) {
     boardId = id; renderCtx();
   });
   function emptyState() {
-    log.innerHTML = `<div class="ai-empty"><h3>Repair assistant</h3><div>Ask about a fault, a rail or a part. The assistant reads this board and its schematic, looks at schematic pages, and uses the readings you log on each net.</div>${app.config.hasKey ? "" : `<div class="notice">Add your Anthropic API key in <button class="btn" data-act="settings">Settings</button> to turn the assistant on.</div>`}</div>`;
+    const ready = app.config.hasKey || app.config.provider === "custom";
+    log.innerHTML = `<div class="ai-empty"><h3>Repair assistant</h3><div>Ask about a fault, a rail or a part. The assistant reads this board and its schematic, looks at schematic pages, and uses the readings you log on each net.</div>${ready ? "" : `<div class="notice">Connect an AI service in <button class="btn" data-act="settings">Settings</button> to turn the assistant on. Works with Claude, OpenAI, Gemini, OpenRouter or a local model.</div>`}</div>`;
   }
   log.addEventListener("click", (e) => {
     const r = e.target.closest(".ref"); if (r) { app.selectByName(r.dataset.name); return; }
@@ -208,37 +222,161 @@ export function initAssistant(app) {
   function scroll() { log.scrollTop = log.scrollHeight; }
   function setBusy(v) { busy = v; sendBtn.textContent = v ? "Stop" : "Send"; renderCtx(); }
 
-  /* ---------------- API loop ---------------- */
+  /* ---------------- API loop (provider-agnostic) ----------------
+     History is kept in a neutral form and converted to each service's wire format at send time:
+       { role:"user", text }
+       { role:"assistant", text, calls:[{id,name,input}] }
+       { role:"tool", results:[{id,name,text,images:[b64…]}] }                                   */
+  function providerLabel() { const p = app.config.provider || "anthropic"; return (app.PROVIDERS[p] && app.PROVIDERS[p].label) || p; }
+  function toolToNeutral(out) {
+    if (typeof out === "string") return { text: out, images: [] };
+    let text = "", images = [];
+    for (const part of out) { if (part.type === "text") text += (text ? "\n" : "") + part.text; else if (part.type === "image") images.push(part.source.data); }
+    return { text: text || "(image attached)", images };
+  }
+  function prepared() {
+    const out = JSON.parse(JSON.stringify(messages)); let keep = 3; // keep images only in the 3 most recent tool turns
+    for (let i = out.length - 1; i >= 0; i--) {
+      const m = out[i]; if (m.role !== "tool" || !m.results.some((r) => r.images && r.images.length)) continue;
+      if (keep > 0) { keep--; continue; }
+      m.results.forEach((r) => { if (r.images && r.images.length) { r.text = (r.text ? r.text + " " : "") + "[earlier image removed to save context; call the view tool again if needed]"; r.images = []; } });
+    }
+    return out;
+  }
+  function makeSink(bubble) {
+    let textEl = null, acc = "", raf = 0;
+    const paint = () => { raf = 0; if (textEl) { textEl.innerHTML = md(acc); linkify(textEl); scroll(); } };
+    return {
+      onText(d) { if (!textEl) { textEl = document.createElement("div"); bubble.appendChild(textEl); acc = ""; } acc += d; if (!raf) raf = requestAnimationFrame(paint); },
+      toolStart(id, name) { const chip = document.createElement("span"); chip.className = "tool run"; chip.dataset.tool = id; chip.textContent = (TOOL_LABEL[name] || (() => name))({}); bubble.appendChild(chip); scroll(); },
+      toolLabel(id, name, input) { const chip = bubble.querySelector(`[data-tool="${id}"]`); if (chip) chip.textContent = (TOOL_LABEL[name] || (() => name))(input); },
+      end() { if (raf) cancelAnimationFrame(raf); paint(); textEl = null; },
+    };
+  }
+  async function readSSE(r, onEvent) {
+    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx; while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        const dl = chunk.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join(""); if (!dl) continue;
+        if (dl === "[DONE]") return;
+        let ev; try { ev = JSON.parse(dl); } catch (e) { continue; } onEvent(ev);
+      }
+    }
+  }
+  async function postStream(provider, body, signal) {
+    const r = await app.api("/api/messages", { method: "POST", headers: { "Content-Type": "application/json", "X-TL-Provider": provider }, body: JSON.stringify(body), signal });
+    if (!r.ok) {
+      let j = null; try { j = await r.json(); } catch (e) {}
+      const em = j && j.error && (j.error.message || j.error.code);
+      const who = providerLabel(); let msg = `The assistant request failed (HTTP ${r.status}).`; let settings = false;
+      if (r.status === 401 || r.status === 403) { msg = `${who} rejected the API key. Check it in Settings.`; settings = true; }
+      else if (r.status === 428) { msg = em || `Set up the ${who} connection in Settings first.`; settings = true; }
+      else if (r.status === 404 && em && /model|not found|does not exist/i.test(em)) { msg = `The model "${body.model}" isn't available on ${who}. Pick another in Settings.`; settings = true; }
+      else if (r.status === 400 && em && /image|vision|multimodal/i.test(em)) { msg = `The model "${body.model}" can't read images, which the assistant sends. Pick a vision model in Settings. (${em})`; settings = true; }
+      else if (r.status === 429) msg = `${who} rate-limited the request. Wait a moment and try again.`;
+      else if (r.status === 502) msg = `Trace Lab couldn't reach ${who}.` + (em ? " " + em : " Check your connection.");
+      else if (r.status === 503 || r.status === 529) msg = `${who} is overloaded right now. Try again shortly.`;
+      else if (em) msg += " " + em;
+      const e = new Error(msg); e.settings = settings; throw e;
+    }
+    return r;
+  }
+  // ---- Anthropic Messages API ----
+  function toAnthropic(neu) {
+    return neu.map((m) => {
+      if (m.role === "user") return { role: "user", content: [{ type: "text", text: m.text }] };
+      if (m.role === "assistant") { const content = []; if (m.text) content.push({ type: "text", text: m.text }); for (const c of m.calls || []) content.push({ type: "tool_use", id: c.id, name: c.name, input: c.input || {} }); return { role: "assistant", content: content.length ? content : [{ type: "text", text: "" }] }; }
+      return { role: "user", content: m.results.map((r) => ({ type: "tool_result", tool_use_id: r.id, content: r.images && r.images.length ? [{ type: "text", text: r.text }, ...r.images.map((d) => ({ type: "image", source: { type: "base64", media_type: "image/png", data: d } }))] : r.text })) };
+    });
+  }
+  async function streamAnthropic(sink, signal) {
+    const tools = TOOLS.map((t, i) => (i === TOOLS.length - 1 ? Object.assign({ cache_control: { type: "ephemeral" } }, t) : t));
+    const body = { model: app.config.model || "claude-sonnet-5-5", max_tokens: 4096, stream: true, system: [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }], tools, messages: toAnthropic(prepared()) };
+    const r = await postStream("anthropic", body, signal);
+    const blocks = []; const partial = new Map(); let text = "", stop = null;
+    await readSSE(r, (ev) => {
+      if (ev.type === "content_block_start") {
+        const cb = ev.content_block; blocks[ev.index] = cb.type === "tool_use" ? { type: "tool_use", id: cb.id, name: cb.name } : { type: "text" };
+        if (cb.type === "tool_use") { partial.set(ev.index, ""); sink.toolStart(cb.id, cb.name); }
+      } else if (ev.type === "content_block_delta") {
+        const d = ev.delta;
+        if (d.type === "text_delta") { text += d.text; sink.onText(d.text); }
+        else if (d.type === "input_json_delta") partial.set(ev.index, (partial.get(ev.index) || "") + d.partial_json);
+      } else if (ev.type === "content_block_stop") {
+        const b = blocks[ev.index];
+        if (b && b.type === "tool_use") { try { b.input = JSON.parse(partial.get(ev.index) || "{}"); } catch (e) { b.input = {}; } sink.toolLabel(b.id, b.name, b.input); }
+      } else if (ev.type === "message_delta") { if (ev.delta && ev.delta.stop_reason) stop = ev.delta.stop_reason; }
+      else if (ev.type === "error") throw new Error("API error: " + ((ev.error && ev.error.message) || "unknown"));
+    });
+    const calls = blocks.filter((b) => b && b.type === "tool_use").map((b) => ({ id: b.id, name: b.name, input: b.input || {} }));
+    return { text, calls, stop: stop === "tool_use" ? "tool" : stop === "max_tokens" ? "length" : "end" };
+  }
+  // ---- OpenAI-compatible Chat Completions (OpenAI, Gemini, OpenRouter, local/custom) ----
+  const openaiTools = TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } }));
+  function toOpenAI(neu) {
+    const out = [{ role: "system", content: SYSTEM }];
+    for (const m of neu) {
+      if (m.role === "user") out.push({ role: "user", content: m.text });
+      else if (m.role === "assistant") { const msg = { role: "assistant", content: m.text || null }; if (m.calls && m.calls.length) msg.tool_calls = m.calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.input || {}) } })); out.push(msg); }
+      else { const imgs = []; for (const r of m.results) { out.push({ role: "tool", tool_call_id: r.id, content: r.text || "(no text)" }); for (const d of r.images || []) imgs.push(d); } if (imgs.length) out.push({ role: "user", content: [{ type: "text", text: "Images returned by the tools above:" }, ...imgs.map((d) => ({ type: "image_url", image_url: { url: "data:image/png;base64," + d } }))] }); }
+    }
+    return out;
+  }
+  async function streamOpenAI(sink, signal, provider) {
+    const body = { model: app.config.model, stream: true, messages: toOpenAI(prepared()), tools: openaiTools, tool_choice: "auto" };
+    const r = await postStream(provider, body, signal);
+    let text = "", stop = null; const calls = []; // index -> {id,name,args}
+    await readSSE(r, (ev) => {
+      const ch = ev.choices && ev.choices[0]; if (!ch) return;
+      const d = ch.delta || {};
+      if (d.content) { text += d.content; sink.onText(d.content); }
+      for (const tc of d.tool_calls || []) {
+        const i = tc.index || 0; if (!calls[i]) { calls[i] = { id: tc.id || "call_" + i, name: "", args: "" }; }
+        if (tc.id) calls[i].id = tc.id;
+        if (tc.function && tc.function.name) { calls[i].name = tc.function.name; sink.toolStart(calls[i].id, calls[i].name); }
+        if (tc.function && tc.function.arguments) calls[i].args += tc.function.arguments;
+      }
+      if (ch.finish_reason) stop = ch.finish_reason;
+    });
+    const outCalls = calls.filter(Boolean).map((c) => { let input = {}; try { input = JSON.parse(c.args || "{}"); } catch (e) {} sink.toolLabel(c.id, c.name, input); return { id: c.id, name: c.name, input }; });
+    return { text, calls: outCalls, stop: stop === "tool_calls" || outCalls.length ? "tool" : stop === "length" ? "length" : "end" };
+  }
   async function send(text) {
     if (busy) return;
     if (!app.hasBackend) { const d = addBot(); d.innerHTML = `<p class="err-msg">The assistant runs through the Trace Lab desktop app, which keeps your API key off the page. Open this page from TraceLab.exe.</p>`; return; }
-    if (!app.config.hasKey) { const d = addBot(); d.innerHTML = `<p>Add your Anthropic API key in <button class="btn" data-act="settings">Settings</button> first.</p>`; scroll(); return; }
+    const prov = app.config.provider || "anthropic";
+    if (!app.config.hasKey && prov !== "custom") { const d = addBot(); d.innerHTML = `<p>Add your ${app.esc(providerLabel())} API key in <button class="btn" data-act="settings">Settings</button> first.</p>`; scroll(); return; }
+    if (!app.config.model) { const d = addBot(); d.innerHTML = `<p>Choose a model for ${app.esc(providerLabel())} in <button class="btn" data-act="settings">Settings</button> first.</p>`; scroll(); return; }
     if (!messages.length) log.innerHTML = "";
     input.value = ""; input.style.height = "auto"; addUser(text);
     const base = messages.length;
-    messages.push({ role: "user", content: [{ type: "text", text: contextBlock() + "\n\n" + text }] });
+    messages.push({ role: "user", text: contextBlock() + "\n\n" + text });
     setBusy(true); ctrl = new AbortController();
     let bubble = addBot();
     try {
       for (let turn = 0; turn < 16; turn++) {
-        const res = await stream(bubble, ctrl.signal);
-        messages.push({ role: "assistant", content: res.content });
-        if (res.stop_reason !== "tool_use") { if (res.stop_reason === "max_tokens") appendNote(bubble, "Reply was cut off at the length limit. Ask it to continue."); break; }
+        const sink = makeSink(bubble);
+        const res = prov === "anthropic" ? await streamAnthropic(sink, ctrl.signal) : await streamOpenAI(sink, ctrl.signal, prov);
+        sink.end();
+        messages.push({ role: "assistant", text: res.text, calls: res.calls });
+        if (res.stop !== "tool") { if (res.stop === "length") appendNote(bubble, "Reply was cut off at the length limit. Ask it to continue."); break; }
         const results = [];
-        for (const blk of res.content.filter((c) => c.type === "tool_use")) {
-          const chip = bubble.querySelector(`[data-tool="${blk.id}"]`);
-          let out; try { const fn = T[blk.name]; out = fn ? await fn(blk.input || {}) : `Unknown tool ${blk.name}`; } catch (err) { out = "Tool error: " + (err.message || err); }
+        for (const c of res.calls) {
+          const chip = bubble.querySelector(`[data-tool="${c.id}"]`);
+          let out; try { const fn = T[c.name]; out = fn ? await fn(c.input || {}) : `Unknown tool ${c.name}`; } catch (err) { out = "Tool error: " + (err.message || err); }
           if (chip) chip.classList.remove("run");
-          results.push({ type: "tool_result", tool_use_id: blk.id, content: typeof out === "string" ? out : out });
+          const n = toolToNeutral(out); results.push({ id: c.id, name: c.name, text: n.text, images: n.images });
         }
-        messages.push({ role: "user", content: results });
+        messages.push({ role: "tool", results });
         bubble = addBot();
       }
     } catch (err) {
       if (err.name === "AbortError") appendNote(bubble, "Stopped.");
       else { const p = document.createElement("p"); p.className = "err-msg"; p.innerHTML = app.esc(err.message || String(err)) + (err.settings ? ` <button class="btn" data-act="settings">Open Settings</button>` : ""); bubble.appendChild(p); }
-      // roll history back to before this question so the next request is well-formed
-      messages.length = base;
+      messages.length = base; // roll back so the next request is well-formed
     } finally {
       bubble.querySelectorAll(".tool.run").forEach((c) => c.classList.remove("run"));
       if (!bubble.textContent.trim()) bubble.remove();
@@ -246,62 +384,6 @@ export function initAssistant(app) {
     }
   }
   function appendNote(bubble, t) { const p = document.createElement("p"); p.className = "foot"; p.textContent = t; bubble.appendChild(p); }
-  function prepared() {
-    // keep images only in the three most recent tool-result turns to bound context size
-    const out = JSON.parse(JSON.stringify(messages)); let keep = 3;
-    for (let i = out.length - 1; i >= 0; i--) {
-      const m = out[i]; if (m.role !== "user") continue; const tr = m.content.filter((c) => c.type === "tool_result" && Array.isArray(c.content) && c.content.some((x) => x.type === "image"));
-      if (!tr.length) continue; if (keep > 0) { keep--; continue; }
-      tr.forEach((c) => (c.content = c.content.map((x) => (x.type === "image" ? { type: "text", text: "[earlier image removed to save context; call the view tool again if needed]" } : x))));
-    }
-    // cache the conversation prefix
-    const lastUser = [...out].reverse().find((m) => m.role === "user"); if (lastUser) { const c = lastUser.content[lastUser.content.length - 1]; if (c && c.type !== "image") c.cache_control = { type: "ephemeral" }; }
-    return out;
-  }
-  async function stream(bubble, signal) {
-    const body = { model: app.config.model || "claude-sonnet-5-5", max_tokens: 4096, stream: true, system: [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }], tools: TOOLS, messages: prepared() };
-    const r = await app.api("/api/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
-    if (!r.ok) {
-      let msg = `The assistant request failed (HTTP ${r.status}).`; let j = null; try { j = await r.json(); } catch (e) {}
-      const em = j && j.error && j.error.message;
-      if (r.status === 401) { const e = new Error("Your Anthropic API key was rejected. Check it in Settings."); e.settings = true; throw e; }
-      if (r.status === 428) { const e = new Error("Add your Anthropic API key in Settings first."); e.settings = true; throw e; }
-      if (r.status === 404 && em && /model/i.test(em)) { const e = new Error(`The model "${body.model}" isn't available on your API key. Pick another model in Settings.`); e.settings = true; throw e; }
-      if (r.status === 429) msg = "Rate limited by the API. Wait a moment and try again.";
-      else if (r.status === 529 || r.status === 503) msg = "The API is overloaded right now. Try again in a minute.";
-      else if (r.status === 502) msg = "Trace Lab couldn't reach api.anthropic.com. Check your internet connection." + (em ? " (" + em + ")" : "");
-      else if (em) msg += " " + em;
-      throw new Error(msg);
-    }
-    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
-    const content = []; let stop = null; const partial = new Map(); let textEl = null, textAcc = "", raf = 0;
-    const paint = () => { raf = 0; if (textEl) { textEl.innerHTML = md(textAcc); linkify(textEl); scroll(); } };
-    for (;;) {
-      const { value, done } = await reader.read(); if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let idx; while ((idx = buf.indexOf("\n\n")) >= 0) {
-        const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
-        const dl = chunk.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join(""); if (!dl) continue;
-        let ev; try { ev = JSON.parse(dl); } catch (e) { continue; }
-        if (ev.type === "content_block_start") {
-          const cb = ev.content_block; content[ev.index] = cb.type === "text" ? { type: "text", text: "" } : cb.type === "tool_use" ? { type: "tool_use", id: cb.id, name: cb.name, input: {} } : cb;
-          if (cb.type === "text") { textEl = document.createElement("div"); bubble.appendChild(textEl); textAcc = ""; }
-          if (cb.type === "tool_use") { partial.set(ev.index, ""); const chip = document.createElement("span"); chip.className = "tool run"; chip.dataset.tool = cb.id; chip.textContent = (TOOL_LABEL[cb.name] || (() => cb.name))({}); bubble.appendChild(chip); scroll(); }
-        } else if (ev.type === "content_block_delta") {
-          const d = ev.delta;
-          if (d.type === "text_delta") { content[ev.index].text += d.text; textAcc += d.text; if (!raf) raf = requestAnimationFrame(paint); }
-          else if (d.type === "input_json_delta") partial.set(ev.index, (partial.get(ev.index) || "") + d.partial_json);
-        } else if (ev.type === "content_block_stop") {
-          const blk = content[ev.index];
-          if (blk && blk.type === "tool_use") { try { blk.input = JSON.parse(partial.get(ev.index) || "{}"); } catch (e) { blk.input = {}; } const chip = bubble.querySelector(`[data-tool="${blk.id}"]`); if (chip) chip.textContent = (TOOL_LABEL[blk.name] || (() => blk.name))(blk.input); }
-          if (blk && blk.type === "text") { paint(); textEl = null; }
-        } else if (ev.type === "message_delta") { if (ev.delta && ev.delta.stop_reason) stop = ev.delta.stop_reason; }
-        else if (ev.type === "error") { throw new Error("API error: " + ((ev.error && ev.error.message) || "unknown")); }
-      }
-    }
-    if (raf) { cancelAnimationFrame(raf); paint(); }
-    return { content: content.filter(Boolean).filter((c) => !(c.type === "text" && !c.text)), stop_reason: stop };
-  }
 
   /* ---------------- markdown ---------------- */
   function inline(s) {

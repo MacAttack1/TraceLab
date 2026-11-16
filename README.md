@@ -7,9 +7,26 @@ Windows 10/11 (64-bit).
   .cst, Altium ASCII, KiCad, IPC-D-356, Allegro text extracts and CSV pin lists.
 - Click a net or part on the board or in the schematic PDF to find it in the other.
 - Subnets: follows a rail through resistors, inductors, ferrites, fuses and jumpers.
-- Log diode-mode, voltage and resistance readings per net.
-- Repair assistant (Anthropic API key): reads the board and schematic, views schematic pages,
-  and suggests diagnostic steps.
+- Log diode-mode, voltage and resistance readings per net, and mark nets known-good or faulty.
+  Readings persist in a local database and carry across boards.
+- Repair assistant: reads the board and schematic, views schematic pages, uses your readings
+  (including known-good values from other boards), and suggests diagnostic steps.
+  Works with Anthropic (Claude), OpenAI, Google Gemini, OpenRouter, or a local/custom
+  OpenAI-compatible server (Ollama, LM Studio, …). Pick the service and model in Settings.
+- Theme (system/light/dark) and accent colour in Settings.
+
+## Encrypted boardviews and the FZ key
+
+Encrypted ASUS `.fz` files need the ASUS RC6 key. It is **not** stored in this repo. It is injected
+at build time from a secret so released builds can open `.fz` files without the user entering anything:
+
+- **Local builds:** put the key (352 hex chars = 44 eight-digit words, no `0x`, no spaces) in
+  `build/fzkey.secret` (gitignored), or set the `TRACELAB_FZ_KEY` env var before `build.sh`.
+- **GitHub Actions:** add a repository secret named `TRACELAB_FZ_KEY` with the same value
+  (Settings > Secrets and variables > Actions). The release workflow passes it to the build.
+
+Without it, every other format still works; only encrypted `.fz` files won't open.
+XZZ and CAE keys are still entered per-user in Settings.
 
 ## Install
 
@@ -52,17 +69,20 @@ node test/parsers.test.mjs          # format parser tests
 
 | Path | What it is |
 |---|---|
-| `main.go` | local server, settings, Anthropic API proxy, startup files |
+| `main.go` | local server, settings, config, startup files, built-in keys |
+| `providers.go` | AI provider proxy (Anthropic + OpenAI-compatible services) |
+| `readings.go` | readings database (per board, cross-board search) |
 | `update.go` | GitHub release check, download, checksum, hand-off to installer |
 | `window_windows.go` | WebView2 app window |
 | `installer/` | per-user installer and uninstaller (embeds the built app) |
 | `web/js/parsers.js` | boardview format parsers |
-| `web/js/app.js` | board and schematic viewer |
-| `web/js/ai.js` | repair assistant: system prompt, tools, streaming |
-| `build/` | icon sources and Windows manifests |
+| `web/js/app.js` | board and schematic viewer, settings, readings UI |
+| `web/js/ai.js` | repair assistant: system prompt, tools, provider adapters |
+| `build/` | icon sources, Windows manifests, `fzkey.secret` (gitignored) |
 
-Env vars: `ANTHROPIC_API_KEY`, `TRACELAB_DEBUG=1` (WebView devtools), `TRACELAB_PORT`,
-`TRACELAB_API_BASE`, `TRACELAB_GITHUB_API`.
+Env vars: `ANTHROPIC_API_KEY`, `TRACELAB_FZ_KEY` (build-time), `TRACELAB_DEBUG=1` (WebView devtools),
+`TRACELAB_PORT`, `TRACELAB_API_BASE` (Anthropic base, for testing), `TRACELAB_AI_BASE`
+(OpenAI-compatible base, for testing), `TRACELAB_GITHUB_API`.
 
 ## Credits
 

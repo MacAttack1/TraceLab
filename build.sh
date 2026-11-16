@@ -7,7 +7,15 @@ REPO="${2:-}"
 cd "$(dirname "$0")"
 mkdir -p dist installer/payload
 export GOOS=windows GOARCH=amd64 CGO_ENABLED=0
-go build -trimpath -ldflags "-H windowsgui -s -w -X main.appVersion=${VERSION} -X main.defaultUpdateRepo=${REPO}" -o installer/payload/TraceLab.exe .
+
+# Built-in ASUS FZ key (RC6), injected from a secret so it never lives in the repo.
+# Provide it as the TRACELAB_FZ_KEY env var (a GitHub Actions secret) or in build/fzkey.secret
+# (gitignored): 352 hex chars = 44 eight-digit words, no 0x, no spaces.
+FZKEY="${TRACELAB_FZ_KEY:-}"
+if [ -z "$FZKEY" ] && [ -f build/fzkey.secret ]; then FZKEY="$(tr -cd '0-9a-fA-F' < build/fzkey.secret)"; fi
+if [ -z "$FZKEY" ]; then echo "warning: no FZ key set; encrypted .fz files won't open in this build" >&2; fi
+
+go build -trimpath -ldflags "-H windowsgui -s -w -X main.appVersion=${VERSION} -X main.defaultUpdateRepo=${REPO} -X main.builtinFZKeyHex=${FZKEY}" -o installer/payload/TraceLab.exe .
 go build -trimpath -ldflags "-H windowsgui -s -w -X main.appVersion=${VERSION}" -o "dist/TraceLab-Setup-${VERSION}.exe" ./installer
 cp installer/payload/TraceLab.exe "dist/TraceLab-${VERSION}-portable.exe"
 ( cd dist && sha256sum "TraceLab-Setup-${VERSION}.exe" > "TraceLab-Setup-${VERSION}.exe.sha256" )

@@ -1,3 +1,4 @@
 dist/
 installer/payload/*.exe
 *.log
+build/fzkey.secret

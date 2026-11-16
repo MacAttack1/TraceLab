@@ -13,8 +13,11 @@ export async function api(path, opts = {}) {
   const headers = Object.assign({ "X-TL-Token": TOKEN }, opts.headers || {});
   return fetch(path, Object.assign({}, opts, { headers }));
 }
-export const config = { hasKey: false, model: "claude-sonnet-5-5", fz_key: "", xzz_key: "", cae_key: "" };
+export const config = { hasKey: false, provider: "anthropic", model: "claude-sonnet-5-5", base_url: "", xzz_key: "", cae_key: "", keyProviders: {}, theme_mode: "system", accent: "copper" };
 async function loadConfig() { if (!hasBackend) return; try { const r = await api("/api/config"); if (r.ok) Object.assign(config, await r.json()); } catch (e) {} }
+// Built-in decode keys (e.g. ASUS FZ) are served by the backend at runtime, never shipped in the page.
+const builtinKeys = { fz: "", cae: "" };
+async function loadBuiltinKeys() { if (!hasBackend) return; try { const r = await api("/api/keys"); if (r.ok) { const k = await r.json(); builtinKeys.fz = k.fz || ""; builtinKeys.cae = k.cae || ""; } } catch (e) {} }
 
 /* ---------------- pdf.js ---------------- */
 let pdfjsLib = null;
@@ -523,12 +526,32 @@ function drawOps(ctx, ops) {
 }
 
 /* ---------------- readings (per board, per net) ---------------- */
+// Backed by the desktop database so good/bad values persist across sessions and boards.
+// Falls back to localStorage when running without the backend (plain browser preview).
 const rKey = () => "tl.readings." + (S.board ? S.board.name : "none");
-export function getReadings() { try { return JSON.parse(localStorage.getItem(rKey()) || "{}"); } catch (e) { return {}; } }
+let readingsCache = {};
+let readingsBoard = null;
+export function getReadings() { return readingsCache; }
+async function loadReadings() {
+  const name = S.board ? S.board.name : null; readingsBoard = name; readingsCache = {};
+  if (!name) return;
+  if (hasBackend) {
+    try { const r = await api("/api/readings?board=" + encodeURIComponent(name)); if (r.ok) readingsCache = await r.json(); } catch (e) {}
+  } else {
+    try { readingsCache = JSON.parse(localStorage.getItem(rKey()) || "{}"); } catch (e) {}
+  }
+  if (S.sel && S.sel.type === "net") renderInspector();
+}
 function setReading(net, field, val) {
-  const all = getReadings(); const r = all[net] || {}; r[field] = val; r.t = Date.now();
-  if (!r.diode && !r.volts && !r.ohms && !r.note) delete all[net]; else all[net] = r;
-  try { localStorage.setItem(rKey(), JSON.stringify(all)); } catch (e) {}
+  const r = Object.assign({}, readingsCache[net] || {});
+  r[field] = val; r.updated = Date.now();
+  if (!r.status && !r.diode && !r.volts && !r.ohms && !r.note) delete readingsCache[net]; else readingsCache[net] = r;
+  if (hasBackend && S.board) {
+    const cur = readingsCache[net] || {};
+    api("/api/readings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ board: S.board.name, net, status: cur.status || "", diode: cur.diode || "", volts: cur.volts || "", ohms: cur.ohms || "", note: cur.note || "" }) }).catch(() => {});
+  } else {
+    try { localStorage.setItem(rKey(), JSON.stringify(readingsCache)); } catch (e) {}
+  }
 }
 
 /* ---------------- inspector ---------------- */
@@ -564,7 +587,12 @@ export function renderInspector() {
     h += `<div class="selh"><div class="kind">Net${gnd ? " · ground" : ""}</div><h2>${esc(sel.name)}</h2>
       <div class="meta">${pins.length} pins · ${parts.size} parts · top ${top} / bottom ${bot}</div>
       <div class="row">${fromPin ? `<button class="btn" data-part="${esc(b.parts[fromPin.part].name)}">Part ${esc(b.parts[fromPin.part].name)} · pin ${esc(fromPin.num)}</button>` : ""}<button class="btn" data-act="ask">Ask assistant</button><button class="btn" data-act="clear">Clear</button></div></div>
-      <div class="sec"><h3>Your readings</h3><div class="readings">
+      <div class="sec"><h3>Your readings${rd.status === "good" ? ` <span class="tag good">known good</span>` : rd.status === "bad" ? ` <span class="tag bad">fault</span>` : ""}</h3>
+        <div class="statrow" role="group" aria-label="Mark this net">
+          <button class="statbtn${rd.status === "good" ? " on good" : ""}" data-status="good" title="Mark this net known-good">Good</button>
+          <button class="statbtn${rd.status === "bad" ? " on bad" : ""}" data-status="bad" title="Mark this net faulty">Fault</button>
+          <button class="statbtn${!rd.status ? " on" : ""}" data-status="" title="No label">—</button></div>
+        <div class="readings">
         <label>DIODE (V)<input id="rDiode" data-f="diode" value="${esc(rd.diode || "")}" placeholder="–"></label>
         <label>VOLTAGE (V)<input id="rVolts" data-f="volts" value="${esc(rd.volts || "")}" placeholder="–"></label>
         <label>TO GND (Ω)<input id="rOhms" data-f="ohms" value="${esc(rd.ohms || "")}" placeholder="–"></label>
@@ -598,6 +626,8 @@ export function renderInspector() {
   el.innerHTML = h;
 }
 $("#insp").addEventListener("click", (e) => {
+  const sb = e.target.closest("[data-status]");
+  if (sb && S.sel && S.sel.type === "net") { const cur = (readingsCache[S.sel.name] || {}).status || ""; setReading(S.sel.name, "status", sb.dataset.status === cur ? "" : sb.dataset.status); renderInspector(); return; }
   const t = e.target.closest("[data-net],[data-part],[data-focus],[data-depth],[data-page],[data-act]"); if (!t) return;
   const act = t.dataset.act;
   if (act === "clear") { select(null); return; }
@@ -736,7 +766,7 @@ function setBoard(b) {
   S.board = b; if (S.sch && S.sch.sample && !b.sample) { S.sch = null; resetSR(); updatePageSel(); $("#schName").textContent = ""; }
   $("#boardName").textContent = `${b.name} · ${b.format} · ${b.parts.length} parts · ${b.nets.size} nets`;
   S.side = "T"; document.querySelectorAll("#sideSeg button").forEach((x) => x.setAttribute("aria-pressed", x.dataset.s === "T"));
-  lastErr = null; select(null); fitBoard();
+  lastErr = null; select(null); fitBoard(); loadReadings();
   boardListeners.forEach((f) => { try { f(b); } catch (e) {} });
 }
 function setSch(sch) {
@@ -751,7 +781,7 @@ export async function openBoardBytes(files) {
   const prog = $("#bprog"); prog.hidden = false; prog.textContent = "Reading " + files[0].name + "…";
   try {
     await new Promise((r) => setTimeout(r, 10));
-    const m = await parseBoardFiles(files, { fz: config.fz_key, xzz: config.xzz_key, cae: config.cae_key });
+    const m = await parseBoardFiles(files, { fz: "", xzz: config.xzz_key, cae: config.cae_key, fzBuiltin: builtinKeys.fz, caeBuiltin: builtinKeys.cae });
     setBoard(finalizeBoard(m));
   } catch (err) { console.error(err); showError(err.message || "Couldn’t read that boardview file.", err instanceof NeedKeyError ? err.kind : null); }
   finally { prog.hidden = true; }
@@ -789,32 +819,73 @@ async function openStartupFiles() {
 
 /* ---------------- settings ---------------- */
 const dlg = $("#settings");
+export const PROVIDERS = {
+  anthropic: { label: "Anthropic", key: "sk-ant-…", host: "api.anthropic.com", getKey: "console.anthropic.com", vision: true,
+    models: ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-opus-4-8"], def: "claude-sonnet-5-5" },
+  openai: { label: "OpenAI", key: "sk-…", host: "api.openai.com", getKey: "platform.openai.com/api-keys", vision: true,
+    models: ["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o", "o4-mini"], def: "gpt-4.1" },
+  gemini: { label: "Google Gemini", key: "AIza…", host: "generativelanguage.googleapis.com", getKey: "aistudio.google.com/apikey", vision: true,
+    models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"], def: "gemini-2.5-flash" },
+  openrouter: { label: "OpenRouter", key: "sk-or-…", host: "openrouter.ai", getKey: "openrouter.ai/keys", vision: true,
+    models: ["anthropic/claude-sonnet-4.5", "openai/gpt-4.1", "google/gemini-2.5-pro", "meta-llama/llama-3.3-70b-instruct"], def: "anthropic/claude-sonnet-4.5" },
+  custom: { label: "your AI service", key: "API key (leave blank if the server needs none)", host: "your endpoint", getKey: "", vision: false,
+    models: ["llama-3.1-8b-instruct", "qwen2.5-coder-7b-instruct"], def: "" },
+};
+const lsModel = (p) => { try { return localStorage.getItem("tl.model." + p) || ""; } catch (e) { return ""; } };
+const setLsModel = (p, m) => { try { localStorage.setItem("tl.model." + p, m); } catch (e) {} };
 function keyStatus() {
-  const fz = parseKeyWords($("#sFz").value), cae = parseKeyWords($("#sCae").value), x = $("#sXzz").value.trim();
+  const cae = parseKeyWords($("#sCae").value), x = $("#sXzz").value.trim();
   const st = (el, ok, txt) => { el.className = "st " + (ok === null ? "" : ok ? "ok" : "bad"); el.textContent = txt; };
-  st($("#sFzSt"), fz.length ? checkRC6Key(fz, [0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1]) : null, fz.length ? (fz.length === 44 ? "" : fz.length + " of 44 words") : "");
-  if (fz.length === 44) $("#sFzSt").textContent = $("#sFzSt").classList.contains("ok") ? "Key looks valid" : "Key fails the parity check";
   st($("#sCaeSt"), cae.length ? cae.length === 44 : null, cae.length ? (cae.length === 44 ? "44 words" : cae.length + " of 44 words") : "");
   st($("#sXzzSt"), x ? checkXZZKey(parseHexKey64(x)) : null, x ? (checkXZZKey(parseHexKey64(x)) ? "Key looks valid" : "Key must be 16 hex digits and pass the parity check") : "");
 }
+function syncProvider(initial) {
+  const p = $("#sProvider").value, info = PROVIDERS[p] || PROVIDERS.anthropic;
+  const hasKey = !!(config.keyProviders && config.keyProviders[p]);
+  $("#sKeyLabel").textContent = p === "custom" ? "API key (optional)" : info.label + " API key";
+  $("#sKey").placeholder = hasKey ? "Key saved. Type a new one to replace it." : info.key;
+  $("#sKeyHint").innerHTML = hasBackend
+    ? `Stored on this PC in your user profile; sent only to ${esc(info.host)}.` + (info.getKey ? ` Get a key at <button class="btn" type="button" data-open="https://${esc(info.getKey)}" style="height:auto;padding:1px 6px">${esc(info.getKey)}</button>` : "")
+    : "The assistant needs the Trace Lab desktop app.";
+  $("#sBaseWrap").hidden = p !== "custom";
+  $("#sModels").innerHTML = info.models.map((m) => `<option value="${esc(m)}"></option>`).join("");
+  $("#sModelHint").textContent = info.vision ? "The assistant sends schematic and board images, so pick a model that can read images." : "For schematic/board images, the model must support vision (many local models don't).";
+  if (initial) $("#sModel").value = config.model || lsModel(p) || info.def;
+  else $("#sModel").value = lsModel(p) || info.def;
+}
 export function openSettings() {
-  $("#sKey").value = ""; $("#sKey").placeholder = config.hasKey ? "Key saved. Type a new one to replace it." : "sk-ant-…";
-  $("#sModel").value = config.model || "claude-sonnet-5-5"; $("#sFz").value = config.fz_key || ""; $("#sXzz").value = config.xzz_key || ""; $("#sCae").value = config.cae_key || "";
+  $("#sProvider").value = PROVIDERS[config.provider] ? config.provider : "anthropic";
+  $("#sKey").value = ""; $("#sBase").value = config.base_url || "";
+  syncProvider(true);
+  $("#sXzz").value = config.xzz_key || ""; $("#sCae").value = config.cae_key || "";
+  const mode = config.theme_mode || "system", accent = config.accent || "copper";
+  document.querySelectorAll("#sThemeSeg button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.mode === mode));
+  document.querySelectorAll("#sAccent .sw").forEach((b) => b.setAttribute("aria-pressed", b.dataset.accent === accent));
   $("#sRepo").value = config.update_repo || ""; $("#sGh").value = ""; $("#sGh").placeholder = config.hasGitHubToken ? "Token saved. Type a new one to replace it." : "github_pat_…";
   $("#sAuto").checked = config.auto_update !== false; $("#sUpdSt").textContent = ""; $("#sUpdSt").className = "st";
   $("#sVer").textContent = "Trace Lab " + (config.version || "");
-  $("#sKeyHint").textContent = hasBackend ? "Used only by the assistant. Stored on this PC in your user profile and sent only to api.anthropic.com." : "The assistant needs the Trace Lab desktop app.";
   keyStatus(); dlg.showModal();
 }
-["#sFz", "#sXzz", "#sCae"].forEach((s) => $(s).addEventListener("input", keyStatus));
+["#sXzz", "#sCae"].forEach((s) => $(s).addEventListener("input", keyStatus));
+$("#sProvider").addEventListener("change", () => syncProvider(false));
 $("#settingsBtn").addEventListener("click", openSettings);
+// live theme preview while the dialog is open
+$("#sThemeSeg").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; document.querySelectorAll("#sThemeSeg button").forEach((x) => x.setAttribute("aria-pressed", x === b)); applyAppearance(b.dataset.mode, currentAccent()); });
+$("#sAccent").addEventListener("click", (e) => { const b = e.target.closest(".sw"); if (!b) return; document.querySelectorAll("#sAccent .sw").forEach((x) => x.setAttribute("aria-pressed", x === b)); applyAppearance(currentMode(), b.dataset.accent); });
+$("#settings").addEventListener("click", (e) => { const o = e.target.closest("[data-open]"); if (o && hasBackend) { e.preventDefault(); api("/api/open?url=" + encodeURIComponent(o.dataset.open), { method: "POST" }).catch(() => {}); } });
+const currentMode = () => (document.querySelector("#sThemeSeg button[aria-pressed=true]") || {}).dataset?.mode || "system";
+const currentAccent = () => (document.querySelector("#sAccent .sw[aria-pressed=true]") || {}).dataset?.accent || "copper";
 dlg.addEventListener("close", async () => {
-  if (dlg.returnValue !== "save") return;
-  const body = { model: $("#sModel").value, fz_key: $("#sFz").value.trim(), xzz_key: $("#sXzz").value.trim(), cae_key: $("#sCae").value.trim() };
+  if (dlg.returnValue !== "save") { applyAppearance(config.theme_mode, config.accent); return; } // revert live preview on cancel
+  const provider = $("#sProvider").value, model = $("#sModel").value.trim();
+  setLsModel(provider, model);
+  const body = { provider, model, base_url: $("#sBase").value.trim(), xzz_key: $("#sXzz").value.trim(), cae_key: $("#sCae").value.trim(),
+    theme_mode: currentMode(), accent: currentAccent() };
   const k = $("#sKey").value.trim(); if (k) body.api_key = k;
   body.update_repo = $("#sRepo").value.trim(); body.auto_update = $("#sAuto").checked;
   const gh = $("#sGh").value.trim(); if (gh) body.github_token = gh;
-  Object.assign(config, { model: body.model, fz_key: body.fz_key, xzz_key: body.xzz_key, cae_key: body.cae_key });
+  Object.assign(config, { provider, model, base_url: body.base_url, xzz_key: body.xzz_key, cae_key: body.cae_key, theme_mode: body.theme_mode, accent: body.accent });
+  applyAppearance(config.theme_mode, config.accent);
   if (hasBackend) { try { const r = await api("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); if (r.ok) Object.assign(config, await r.json()); } catch (e) { showError("Couldn’t save settings: " + e.message); } }
   app.assistant && app.assistant.refresh();
   if (body.update_repo && config.auto_update !== false) checkUpdates(false);
@@ -867,7 +938,7 @@ $("#sCheck").addEventListener("click", async () => {
 /* ---------------- exported app API (used by the assistant) ---------------- */
 export const app = {
   S, sv, config, api, hasBackend, select, selectByName, searchAll, expand, isSeries, sortedHits, getReadings, renderRegion,
-  focusBoardOn, focusSchOn, gotoPage, setLayout, setSide, openSettings, reqB, reqS, onSelect, onBoardChange, esc,
+  focusBoardOn, focusSchOn, gotoPage, setLayout, setSide, openSettings, reqB, reqS, onSelect, onBoardChange, esc, PROVIDERS, applyAppearance,
   captureBoard(maxW = 1400) {
     drawBoard(); const W = bc.width, H = bc.height; const s = Math.min(1, maxW / W); const c = document.createElement("canvas");
     c.width = Math.round(W * s); c.height = Math.round(H * s); c.getContext("2d").drawImage(bc, 0, 0, c.width, c.height); return c;
@@ -880,12 +951,19 @@ window.TraceLab = app;
 readTheme();
 const mq = window.matchMedia("(prefers-color-scheme: dark)"); const rethem = () => { readTheme(); reqB(); reqS(); };
 try { mq.addEventListener("change", rethem); } catch (e) {}
-new MutationObserver(rethem).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+new MutationObserver(rethem).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-accent"] });
+export function applyAppearance(mode, accent) {
+  const el = document.documentElement;
+  if (mode === "light" || mode === "dark") el.setAttribute("data-theme", mode); else el.removeAttribute("data-theme");
+  el.setAttribute("data-accent", accent || "copper");
+}
 let aiPref = "1"; try { aiPref = localStorage.getItem("tl.ai") || "1"; } catch (e) {}
 toggleAI(aiPref === "1");
 [bwrap, swrap].forEach((w) => new ResizeObserver(() => { reqB(); reqS(); }).observe(w));
 (async () => {
   await loadConfig();
+  applyAppearance(config.theme_mode, config.accent);
+  await loadBuiltinKeys();
   if (config.just_updated) goodNote = `Trace Lab was updated to ${config.version}.`;
   if (config.update_repo && config.auto_update !== false) setTimeout(() => checkUpdates(false), 2500);
   app.assistant = initAssistant(app);
@@ -895,7 +973,7 @@ toggleAI(aiPref === "1");
     $("#boardName").textContent = `${S.board.name} · ${S.board.parts.length} parts · ${S.board.nets.size} nets`;
     $("#schName").textContent = `${S.sch.name} · ${S.sch.pages.length} pages`;
     await new Promise((r) => requestAnimationFrame(r));
-    fitBoard(); fitSch(); select({ type: "net", name: "PP3V3_S5" }, { focusBoard: false });
+    fitBoard(); fitSch(); loadReadings(); select({ type: "net", name: "PP3V3_S5" }, { focusBoard: false });
     boardListeners.forEach((f) => { try { f(S.board); } catch (e) {} });
   }
   renderInspector(); updatePageSel();

@@ -28,21 +28,59 @@ var webFS embed.FS
 const appName = "Trace Lab"
 const appID = "TraceLab" // folder, registry and user-agent name
 
-// Set at build time: -ldflags "-X main.appVersion=1.2.0 -X main.defaultUpdateRepo=owner/repo"
-var appVersion = "1.1.0"
+// Set at build time: -ldflags "-X main.appVersion=1.2.0 -X main.defaultUpdateRepo=owner/repo -X main.builtinFZKeyHex=<352 hex chars>"
+var appVersion = "1.2.0"
 var defaultUpdateRepo = ""
+
+// builtinFZKeyHex is the ASUS FZ RC6 key as 44 concatenated 8-hex-digit words (352 chars), injected
+// at build time from a secret so it never lives in the source tree. Empty in a plain build.
+var builtinFZKeyHex = ""
 var justUpdated bool
 
 type Config struct {
-	APIKey string `json:"api_key"`
-	Model  string `json:"model"`
-	FZKey  string `json:"fz_key"`
-	XZZKey string `json:"xzz_key"`
-	CAEKey string `json:"cae_key"`
+	APIKey   string            `json:"api_key,omitempty"` // legacy single key; migrated into Keys["anthropic"]
+	Provider string            `json:"provider"`          // anthropic|openai|gemini|openrouter|custom
+	Model    string            `json:"model"`
+	BaseURL  string            `json:"base_url"` // for provider "custom" (OpenAI-compatible endpoint)
+	Keys     map[string]string `json:"keys"`     // provider -> API key
+	XZZKey   string            `json:"xzz_key"`
+	CAEKey   string            `json:"cae_key"`
+	// Appearance
+	ThemeMode string `json:"theme_mode"` // system|light|dark
+	Accent    string `json:"accent"`     // copper|amber|blue|green|violet|rose|teal
 	// Updates
 	UpdateRepo  string `json:"update_repo"`
 	GitHubToken string `json:"github_token"`
 	AutoUpdate  *bool  `json:"auto_update"`
+}
+
+const defaultModelAnthropic = "claude-sonnet-5-5"
+
+var aiProviders = map[string]string{
+	"anthropic":  "https://api.anthropic.com",
+	"openai":     "https://api.openai.com/v1",
+	"gemini":     "https://generativelanguage.googleapis.com/v1beta/openai",
+	"openrouter": "https://openrouter.ai/api/v1",
+	"custom":     "",
+}
+
+func providerKey(p string) string {
+	if cfg.Keys != nil {
+		if k := strings.TrimSpace(cfg.Keys[p]); k != "" {
+			return k
+		}
+	}
+	if p == "anthropic" {
+		return strings.TrimSpace(cfg.APIKey)
+	}
+	return ""
+}
+
+func currentProvider() string {
+	if _, ok := aiProviders[cfg.Provider]; ok {
+		return cfg.Provider
+	}
+	return "anthropic"
 }
 
 func effectiveRepo() string {
@@ -88,11 +126,21 @@ func loadConfig() {
 	if err == nil {
 		_ = json.Unmarshal(b, &cfg)
 	}
-	if cfg.Model == "" {
-		cfg.Model = "claude-sonnet-5-5"
+	if cfg.Keys == nil {
+		cfg.Keys = map[string]string{}
 	}
-	if k := os.Getenv("ANTHROPIC_API_KEY"); cfg.APIKey == "" && k != "" {
-		cfg.APIKey = k
+	if cfg.APIKey != "" && cfg.Keys["anthropic"] == "" { // migrate legacy single key
+		cfg.Keys["anthropic"] = cfg.APIKey
+		cfg.APIKey = ""
+	}
+	if k := os.Getenv("ANTHROPIC_API_KEY"); cfg.Keys["anthropic"] == "" && k != "" {
+		cfg.Keys["anthropic"] = k
+	}
+	if cfg.Provider == "" {
+		cfg.Provider = "anthropic"
+	}
+	if cfg.Model == "" && cfg.Provider == "anthropic" {
+		cfg.Model = defaultModelAnthropic
 	}
 }
 
@@ -107,9 +155,27 @@ func saveConfig() error {
 
 func publicConfig() map[string]any {
 	auto := cfg.AutoUpdate == nil || *cfg.AutoUpdate
-	return map[string]any{"hasKey": cfg.APIKey != "", "model": cfg.Model, "fz_key": cfg.FZKey, "xzz_key": cfg.XZZKey, "cae_key": cfg.CAEKey,
+	prov := currentProvider()
+	keyset := map[string]bool{}
+	for p := range aiProviders {
+		if providerKey(p) != "" {
+			keyset[p] = true
+		}
+	}
+	mode := cfg.ThemeMode
+	if mode == "" {
+		mode = "system"
+	}
+	accent := cfg.Accent
+	if accent == "" {
+		accent = "copper"
+	}
+	return map[string]any{
+		"provider": prov, "model": cfg.Model, "base_url": cfg.BaseURL, "hasKey": providerKey(prov) != "", "keyProviders": keyset,
+		"xzz_key": cfg.XZZKey, "cae_key": cfg.CAEKey, "theme_mode": mode, "accent": accent,
 		"version": appVersion, "update_repo": effectiveRepo(), "default_repo": defaultUpdateRepo, "hasGitHubToken": cfg.GitHubToken != "",
-		"auto_update": auto, "just_updated": justUpdated, "can_self_update": canSelfUpdate}
+		"auto_update": auto, "just_updated": justUpdated, "can_self_update": canSelfUpdate,
+	}
 }
 
 // collectStartup turns command-line paths (e.g. "Open with Trace Lab") into files the UI fetches on load.
@@ -228,29 +294,51 @@ func newServer(addr string) http.Handler {
 				APIKey   *string `json:"api_key"`
 				ClearKey bool    `json:"clear_key"`
 				Model    *string `json:"model"`
-				FZKey    *string `json:"fz_key"`
-				XZZKey   *string `json:"xzz_key"`
-				CAEKey   *string `json:"cae_key"`
-				Repo     *string `json:"update_repo"`
-				GHToken  *string `json:"github_token"`
-				ClearGH  bool    `json:"clear_github_token"`
-				Auto     *bool   `json:"auto_update"`
+				XZZKey    *string `json:"xzz_key"`
+				CAEKey    *string `json:"cae_key"`
+				Provider  *string `json:"provider"`
+				BaseURL   *string `json:"base_url"`
+				ThemeMode *string `json:"theme_mode"`
+				Accent    *string `json:"accent"`
+				Repo      *string `json:"update_repo"`
+				GHToken   *string `json:"github_token"`
+				ClearGH   bool    `json:"clear_github_token"`
+				Auto      *bool   `json:"auto_update"`
 			}
 			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
 				apiErr(w, 400, "Settings couldn't be read.")
 				return
 			}
+			if cfg.Keys == nil {
+				cfg.Keys = map[string]string{}
+			}
+			if in.Provider != nil {
+				if _, ok := aiProviders[*in.Provider]; ok {
+					cfg.Provider = *in.Provider
+				}
+			}
+			// an API key applies to the provider being set in this same request, else the current one
+			keyProv := currentProvider()
 			if in.APIKey != nil && strings.TrimSpace(*in.APIKey) != "" {
-				cfg.APIKey = strings.TrimSpace(*in.APIKey)
+				cfg.Keys[keyProv] = strings.TrimSpace(*in.APIKey)
 			}
 			if in.ClearKey {
-				cfg.APIKey = ""
+				delete(cfg.Keys, keyProv)
+				if keyProv == "anthropic" {
+					cfg.APIKey = ""
+				}
 			}
-			if in.Model != nil && *in.Model != "" {
-				cfg.Model = *in.Model
+			if in.BaseURL != nil {
+				cfg.BaseURL = strings.TrimSpace(*in.BaseURL)
 			}
-			if in.FZKey != nil {
-				cfg.FZKey = *in.FZKey
+			if in.Model != nil {
+				cfg.Model = strings.TrimSpace(*in.Model)
+			}
+			if in.ThemeMode != nil {
+				cfg.ThemeMode = *in.ThemeMode
+			}
+			if in.Accent != nil {
+				cfg.Accent = *in.Accent
 			}
 			if in.XZZKey != nil {
 				cfg.XZZKey = *in.XZZKey
@@ -302,7 +390,14 @@ func newServer(addr string) http.Handler {
 	// Open release pages and docs in the user's browser instead of a popup WebView.
 	mux.HandleFunc("/api/open", func(w http.ResponseWriter, r *http.Request) {
 		u := r.URL.Query().Get("url")
-		if r.Method != http.MethodPost || !(strings.HasPrefix(u, "https://github.com/") || strings.HasPrefix(u, "https://console.anthropic.com/")) {
+		ok := false
+		for _, h := range []string{"https://github.com/", "https://console.anthropic.com/", "https://platform.openai.com/", "https://aistudio.google.com/", "https://openrouter.ai/"} {
+			if strings.HasPrefix(u, h) {
+				ok = true
+				break
+			}
+		}
+		if r.Method != http.MethodPost || !ok {
 			apiErr(w, 400, "That link can't be opened.")
 			return
 		}
@@ -310,63 +405,13 @@ func newServer(addr string) http.Handler {
 		writeJSON(w, 200, map[string]bool{"ok": true})
 	})
 
-	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 20 * time.Second}).DialContext, TLSHandshakeTimeout: 20 * time.Second, ResponseHeaderTimeout: 180 * time.Second}}
-	apiBase := os.Getenv("TRACELAB_API_BASE")
-	if apiBase == "" {
-		apiBase = "https://api.anthropic.com"
-	}
-	mux.HandleFunc("/api/messages", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			apiErr(w, 405, "POST only")
-			return
-		}
-		cfgMu.Lock()
-		key := cfg.APIKey
-		cfgMu.Unlock()
-		if key == "" {
-			apiErr(w, 428, "No Anthropic API key is set. Add one in Settings.")
-			return
-		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
-		if err != nil {
-			apiErr(w, 400, "Request body couldn't be read.")
-			return
-		}
-		req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, apiBase+"/v1/messages", bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("x-api-key", key)
-		req.Header.Set("anthropic-version", "2023-06-01")
-		req.Header.Set("User-Agent", appID+"/"+appVersion)
-		resp, err := client.Do(req)
-		if err != nil {
-			apiErr(w, 502, err.Error())
-			return
-		}
-		defer resp.Body.Close()
-		for _, h := range []string{"Content-Type", "Request-Id", "Retry-After"} {
-			if v := resp.Header.Get(h); v != "" {
-				w.Header().Set(h, v)
-			}
-		}
-		w.Header().Set("Cache-Control", "no-store")
-		w.WriteHeader(resp.StatusCode)
-		fl, _ := w.(http.Flusher)
-		buf := make([]byte, 16<<10)
-		for {
-			n, rerr := resp.Body.Read(buf)
-			if n > 0 {
-				if _, werr := w.Write(buf[:n]); werr != nil {
-					return
-				}
-				if fl != nil {
-					fl.Flush()
-				}
-			}
-			if rerr != nil {
-				return
-			}
-		}
+	// Built-in decode keys served to the page at runtime (injected at build time, never in the repo).
+	mux.HandleFunc("/api/keys", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"fz": builtinFZKeyWords()})
 	})
+
+	registerAIProxy(mux)
+	registerReadingRoutes(mux)
 
 	// Guard: only this machine, only our page. Rejects DNS-rebinding hosts and cross-site API calls.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
