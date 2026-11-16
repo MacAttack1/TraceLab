@@ -55,7 +55,24 @@ button,input,select,textarea{font:inherit;color:inherit}
 [hidden]{display:none!important}
 
 .bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 14px;background:var(--rail);border-bottom:1px solid var(--line)}
-.brand{display:flex;align-items:center;gap:9px;font:600 17px/1 var(--f-head);letter-spacing:.005em;margin-right:6px;white-space:nowrap}
+.menubar{position:relative;display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--rail);border-bottom:1px solid var(--line);z-index:40}
+.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:7px 14px;background:var(--bg);border-bottom:1px solid var(--line)}
+.menus{display:flex;gap:1px}
+.menu{border:0;background:none;height:30px;padding:0 11px;border-radius:5px;cursor:pointer;font-size:13.5px;font-weight:500;color:var(--fg)}
+.menu:hover,.menu[aria-expanded="true"]{background:var(--line)}
+.dropdown{position:absolute;top:38px;left:0;min-width:210px;background:var(--rail);border:1px solid var(--line2);border-radius:7px;box-shadow:0 12px 34px rgba(0,0,0,.4);padding:5px;display:flex;flex-direction:column;gap:1px}
+.dropdown button{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;border-radius:4px;padding:7px 10px;text-align:left;cursor:pointer;font-size:13px;color:var(--fg);white-space:nowrap}
+.dropdown button:hover{background:var(--copper);color:var(--copper-ink)}
+.dropdown button[aria-checked="true"]::before{content:"✓";margin-left:-4px;width:12px;font-size:12px}
+.dropdown .acc{margin-left:auto;color:var(--muted);font-size:11.5px;padding-left:20px}
+.dropdown button:hover .acc{color:var(--copper-ink)}
+.dropdown .sep{height:1px;background:var(--line);margin:4px 2px}
+.dropdown .mlabel{font:600 10px/1 var(--f-ui);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:6px 10px 3px}
+.tbtn.gear{border-color:var(--copper);color:var(--copper);font-weight:600}
+.tbtn.gear:hover{background:var(--copper);color:var(--copper-ink)}
+.toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);background:var(--rail);color:var(--fg);border:1px solid var(--line2);border-radius:7px;padding:10px 16px;font-size:13px;box-shadow:0 12px 34px rgba(0,0,0,.45);opacity:0;pointer-events:none;transition:opacity .15s,transform .15s;z-index:60;max-width:min(560px,90vw)}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.brand{display:flex;align-items:center;gap:9px;font:600 17px/1 var(--f-head);letter-spacing:.005em;margin-right:8px;white-space:nowrap}
 .brand svg{width:24px;height:24px;flex:none}
 .filebtn,.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line2);border-radius:5px;background:transparent;cursor:pointer;white-space:nowrap;font-weight:500;font-size:13px;position:relative}
 .filebtn:hover,.tbtn:hover{border-color:var(--copper)}
@@ -213,7 +230,9 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
 </style>
 </head>
 <body>
-<header class="bar">
+<input type="file" id="fBoard" multiple hidden>
+<input type="file" id="fSch" accept=".pdf,application/pdf" hidden>
+<header class="menubar">
   <div class="brand">
     <svg viewBox="0 0 32 32" aria-hidden="true">
   <defs><linearGradient id="tlbg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#14363b"/><stop offset="1" stop-color="#061114"/></linearGradient>
@@ -226,8 +245,54 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
 </svg>
     Trace Lab
   </div>
-  <label class="filebtn">Open boardview<input type="file" id="fBoard" multiple></label>
-  <label class="filebtn">Open schematic<input type="file" id="fSch" accept=".pdf,application/pdf"></label>
+  <nav class="menus" id="menus">
+    <button class="menu" data-menu="file" aria-haspopup="true" aria-expanded="false">File</button>
+    <button class="menu" data-menu="view" aria-haspopup="true" aria-expanded="false">View</button>
+    <button class="menu" data-menu="assistant" aria-haspopup="true" aria-expanded="false">Assistant</button>
+    <button class="menu" data-menu="help" aria-haspopup="true" aria-expanded="false">Help</button>
+  </nav>
+  <div class="spacer"></div>
+  <button class="tbtn upd" id="updBtn" hidden></button>
+  <button class="tbtn gear" id="settingsBtn" title="Settings">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" stroke-linecap="round"/></svg>Settings</button>
+
+  <div class="dropdown" id="menu-file" role="menu" hidden>
+    <button role="menuitem" data-cmd="open-board">Open boardview…<span class="acc">Ctrl+O</span></button>
+    <button role="menuitem" data-cmd="open-sch">Open schematic PDF…</button>
+    <div class="sep"></div>
+    <button role="menuitem" data-cmd="reload">Reload</button>
+    <button role="menuitem" data-cmd="exit">Exit</button>
+  </div>
+  <div class="dropdown" id="menu-view" role="menu" hidden>
+    <button role="menuitem" data-cmd="view-split">Split view</button>
+    <button role="menuitem" data-cmd="view-board">Board only</button>
+    <button role="menuitem" data-cmd="view-sch">Schematic only</button>
+    <div class="sep"></div>
+    <button role="menuitem" data-cmd="side-top">Top side</button>
+    <button role="menuitem" data-cmd="side-bottom">Bottom side<span class="acc">B</span></button>
+    <button role="menuitem" data-cmd="fit">Fit to window<span class="acc">F</span></button>
+    <button role="menuitem" data-cmd="airwires">Show airwires</button>
+    <div class="sep"></div>
+    <div class="mlabel">Theme</div>
+    <button role="menuitem" data-cmd="theme-system">System</button>
+    <button role="menuitem" data-cmd="theme-light">Light</button>
+    <button role="menuitem" data-cmd="theme-dark">Dark</button>
+  </div>
+  <div class="dropdown" id="menu-assistant" role="menu" hidden>
+    <button role="menuitem" data-cmd="ai-toggle">Show / hide assistant<span class="acc">A</span></button>
+    <button role="menuitem" data-cmd="ai-ask">Ask about selection</button>
+    <button role="menuitem" data-cmd="ai-new">New chat</button>
+  </div>
+  <div class="dropdown" id="menu-help" role="menu" hidden>
+    <button role="menuitem" data-cmd="check-updates">Check for updates…</button>
+    <button role="menuitem" data-cmd="github">View project on GitHub</button>
+    <div class="sep"></div>
+    <button role="menuitem" data-cmd="about">About Trace Lab</button>
+  </div>
+</header>
+<div class="toolbar">
+  <button class="filebtn" id="tbOpenBoard">Open boardview</button>
+  <button class="filebtn" id="tbOpenSch">Open schematic</button>
   <div class="search">
     <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Find net or part  ( / )" aria-label="Find net or part">
     <div class="sugg" id="sugg" role="listbox" hidden></div>
@@ -236,12 +301,9 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
   <div class="seg" id="layoutSeg" role="group" aria-label="Layout">
     <button data-l="board" aria-pressed="false">Board</button><button data-l="split" aria-pressed="true">Split</button><button data-l="sch" aria-pressed="false">Schematic</button>
   </div>
-  <button class="tbtn upd" id="updBtn" hidden></button>
   <button class="tbtn" id="aiToggle" aria-pressed="true" title="Repair assistant (A)">
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" stroke-linejoin="round"/><path d="M5.5 7h.01M8 7h.01M10.5 7h.01" stroke-linecap="round" stroke-width="2"/></svg>Assistant</button>
-  <button class="tbtn" id="settingsBtn" title="Settings" aria-label="Settings">
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" stroke-linecap="round"/></svg></button>
-</header>
+</div>
 
 <main class="work ai" id="work" data-layout="split">
   <aside class="insp" id="insp" aria-live="polite"></aside>

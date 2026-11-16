@@ -29,7 +29,7 @@ const appName = "Trace Lab"
 const appID = "TraceLab" // folder, registry and user-agent name
 
 // Set at build time: -ldflags "-X main.appVersion=1.2.0 -X main.defaultUpdateRepo=owner/repo -X main.builtinFZKeyHex=<352 hex chars>"
-var appVersion = "1.2.0"
+var appVersion = "1.2.1"
 var defaultUpdateRepo = ""
 
 // builtinFZKeyHex is the ASUS FZ RC6 key as 44 concatenated 8-hex-digit words (352 chars), injected
@@ -275,6 +275,12 @@ func newServer(addr string) http.Handler {
 		}
 		if p == "index.html" {
 			b = bytes.Replace(b, []byte("{{TOKEN}}"), []byte(token), 1)
+		}
+		// Never cache the app shell/scripts so an update is never hidden by a stale WebView cache.
+		// The large, stable pdf.js assets under lib/ may cache.
+		if strings.HasPrefix(p, "lib/") {
+			w.Header().Set("Cache-Control", "max-age=86400")
+		} else {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		ct := mimeTypes[strings.ToLower(filepath.Ext(p))]
@@ -383,6 +389,15 @@ func newServer(addr string) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		http.ServeFile(w, r, startup[id].path)
+	})
+
+	mux.HandleFunc("/api/quit", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			apiErr(w, 405, "POST only")
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"ok": true})
+		go func() { time.Sleep(150 * time.Millisecond); os.Exit(0) }()
 	})
 
 	registerUpdateRoutes(mux)

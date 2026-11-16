@@ -748,10 +748,58 @@ function toggleAI(on) {
   if (on) setTimeout(() => $("#aiInput").focus(), 30);
 }
 $("#aiToggle").addEventListener("click", () => toggleAI());
+$("#tbOpenBoard").addEventListener("click", () => $("#fBoard").click());
+$("#tbOpenSch").addEventListener("click", () => $("#fSch").click());
+
+/* ---------------- menu bar ---------------- */
+let openMenu = null, openedAt = 0;
+function closeMenus() { if (!openMenu) return; const btn = document.querySelector(`.menu[data-menu="${openMenu}"]`); if (btn) btn.setAttribute("aria-expanded", "false"); const d = $("#menu-" + openMenu); if (d) d.hidden = true; openMenu = null; }
+function showMenu(name) {
+  closeMenus(); const btn = document.querySelector(`.menu[data-menu="${name}"]`), d = $("#menu-" + name); if (!btn || !d) return;
+  openedAt = Date.now();
+  // reflect live state as checkmarks
+  d.querySelectorAll("[data-cmd]").forEach((b) => b.removeAttribute("aria-checked"));
+  const chk = (cmd, on) => { const b = d.querySelector(`[data-cmd="${cmd}"]`); if (b) b.setAttribute("aria-checked", on ? "true" : "false"); };
+  if (name === "view") { chk("view-split", S.layout === "split"); chk("view-board", S.layout === "board"); chk("view-sch", S.layout === "sch"); chk("side-top", S.side === "T"); chk("side-bottom", S.side === "B"); chk("airwires", S.airwires); const m = config.theme_mode || "system"; chk("theme-system", m === "system"); chk("theme-light", m === "light"); chk("theme-dark", m === "dark"); }
+  if (name === "assistant") chk("ai-toggle", $("#work").classList.contains("ai"));
+  d.style.left = Math.min(btn.offsetLeft, window.innerWidth - d.offsetWidth - 10) + "px";
+  btn.setAttribute("aria-expanded", "true"); d.hidden = false; openMenu = name;
+}
+$("#menus").addEventListener("click", (e) => { const m = e.target.closest(".menu"); if (!m) return; if (openMenu === m.dataset.menu) { if (Date.now() - openedAt > 350) closeMenus(); } else showMenu(m.dataset.menu); });
+$("#menus").addEventListener("mouseover", (e) => { const m = e.target.closest(".menu"); if (m && openMenu && openMenu !== m.dataset.menu) showMenu(m.dataset.menu); });
+async function saveTheme(mode) { applyAppearance(mode, config.accent); config.theme_mode = mode; if (hasBackend) { try { await api("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ theme_mode: mode }) }); } catch (e) {} } }
+const MENU_CMDS = {
+  "open-board": () => $("#fBoard").click(), "open-sch": () => $("#fSch").click(),
+  reload: () => location.reload(), exit: () => { if (hasBackend) api("/api/quit", { method: "POST" }).catch(() => {}); },
+  "view-split": () => doLayout("split"), "view-board": () => doLayout("board"), "view-sch": () => doLayout("sch"),
+  "side-top": () => setSide("T"), "side-bottom": () => setSide("B"), fit: () => { fitBoard(); fitSch(); },
+  airwires: () => { const a = $("#airw"); a.checked = !a.checked; a.dispatchEvent(new Event("change")); },
+  "theme-system": () => saveTheme("system"), "theme-light": () => saveTheme("light"), "theme-dark": () => saveTheme("dark"),
+  "ai-toggle": () => toggleAI(), "ai-new": () => $("#aiNew").click(), "ai-ask": () => app.assistant && app.assistant.askAboutSelection(),
+  "check-updates": async () => {
+    if (!config.update_repo) { openSettings(); toast("Enter your GitHub repo under Settings → Updates first."); return; }
+    toast("Checking GitHub for updates…"); const u = await checkUpdates(true);
+    if (u && u.error) toast(u.error);
+    else if (u && u.newer && !u.asset) toast(`Version ${u.latest} is out, but its release has no installer attached.`);
+    else if (u && !u.newer && u.latest) toast(`You’re up to date (${u.current}).`);
+  },
+  github: () => { if (config.update_repo && hasBackend) api("/api/open?url=" + encodeURIComponent("https://github.com/" + config.update_repo), { method: "POST" }); else toast("Set your GitHub repo under Settings → Updates first."); },
+  about: () => toast(`Trace Lab ${config.version || ""} — boardview & schematic viewer with AI repair assistant.`),
+};
+let toastT = 0;
+function toast(msg) {
+  let el = $("#toast"); if (!el) { el = document.createElement("div"); el.id = "toast"; el.className = "toast"; document.body.appendChild(el); }
+  el.textContent = msg; el.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove("show"), 4000);
+}
+function doLayout(l) { setLayout(l); setTimeout(() => { fitBoard(); fitSch(); }, 30); }
+document.querySelectorAll(".dropdown").forEach((d) => d.addEventListener("click", (e) => { const b = e.target.closest("[data-cmd]"); if (!b) return; closeMenus(); const fn = MENU_CMDS[b.dataset.cmd]; if (fn) fn(); }));
+document.addEventListener("click", (e) => { if (openMenu && !e.target.closest(".menubar")) closeMenus(); });
 document.addEventListener("keydown", (e) => {
-  if (e.target.closest("input,select,textarea") || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target.closest("input,select,textarea")) { if (e.key === "Escape") closeMenus(); return; }
+  if (e.ctrlKey && (e.key === "o" || e.key === "O")) { e.preventDefault(); $("#fBoard").click(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === "/") { e.preventDefault(); q.focus(); }
-  else if (e.key === "Escape") select(null);
+  else if (e.key === "Escape") { if (openMenu) closeMenus(); else select(null); }
   else if (e.key === "b" || e.key === "B") setSide(S.side === "T" ? "B" : "T");
   else if (e.key === "f" || e.key === "F") { fitBoard(); fitSch(); }
   else if (e.key === "a" || e.key === "A") toggleAI();
