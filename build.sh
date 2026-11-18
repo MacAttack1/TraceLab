@@ -21,6 +21,7 @@ if [ -n "$FZKEY" ] && [ "${#FZKEY}" -ne 352 ]; then
 fi
 if [ -z "$FZKEY" ]; then echo "warning: no FZ key set; encrypted .fz files won't open in this build" >&2; fi
 
+cp web/js/aichoice.js installer/wizard/aichoice.js # the setup wizard shares the model picker
 go build -trimpath -ldflags "-H windowsgui -s -w -X main.appVersion=${VERSION} -X main.defaultUpdateRepo=${REPO} -X main.builtinFZKeyHex=${FZKEY}" -o installer/payload/TraceLab.exe .
 go build -trimpath -ldflags "-H windowsgui -s -w -X main.appVersion=${VERSION}" -o "dist/TraceLab-Setup-${VERSION}.exe" ./installer
 cp installer/payload/TraceLab.exe "dist/TraceLab-${VERSION}-portable.exe"

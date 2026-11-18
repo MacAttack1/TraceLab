@@ -29,7 +29,7 @@ const appName = "Trace Lab"
 const appID = "TraceLab" // folder, registry and user-agent name
 
 // Set at build time: -ldflags "-X main.appVersion=1.2.0 -X main.defaultUpdateRepo=owner/repo -X main.builtinFZKeyHex=<352 hex chars>"
-var appVersion = "1.4.0"
+var appVersion = "1.5.0"
 var defaultUpdateRepo = ""
 
 // builtinFZKeyHex is the ASUS FZ RC6 key as 44 concatenated 8-hex-digit words (352 chars), injected
@@ -59,6 +59,14 @@ type Config struct {
 	AutoUpdate  *bool  `json:"auto_update"`
 	// Bench instruments (multimeter, power supply, oscilloscope)
 	Instruments []InstCfg `json:"instruments"`
+	// Where the user keeps boardviews and schematics (Library, automatic schematic matching)
+	BoardsDir     string `json:"boards_dir"`
+	SchematicsDir string `json:"schematics_dir"`
+	AutoSchematic *bool  `json:"auto_schematic"`
+	// Offline AI: model and engine build run by the built-in llama.cpp server
+	LocalModel  string `json:"local_model"`
+	LocalEngine string `json:"local_engine"`
+	ModelsDir   string `json:"models_dir"`
 }
 
 const defaultModelAnthropic = "claude-sonnet-5-5"
@@ -69,6 +77,7 @@ var aiProviders = map[string]string{
 	"gemini":     "https://generativelanguage.googleapis.com/v1beta/openai",
 	"openrouter": "https://openrouter.ai/api/v1",
 	"custom":     "",
+	"local":      "", // offline AI run by Trace Lab itself (llama.cpp on this PC)
 }
 
 func providerKey(p string) string {
@@ -181,6 +190,8 @@ func publicConfig() map[string]any {
 		"provider": prov, "model": cfg.Model, "base_url": cfg.BaseURL, "hasKey": providerKey(prov) != "", "keyProviders": keyset,
 		"xzz_key": cfg.XZZKey, "cae_key": cfg.CAEKey, "theme_mode": mode, "accent": accent, "split_dir": cfg.SplitDir,
 		"readings": storageInfo(), "readings_dir": cfg.ReadingsDir, "tutorial_done": cfg.TutorialDone,
+		"boards_dir": cfg.BoardsDir, "schematics_dir": cfg.SchematicsDir, "auto_schematic": cfg.AutoSchematic == nil || *cfg.AutoSchematic,
+		"local_model": cfg.LocalModel, "local_engine": cfg.LocalEngine, "models_dir": modelsDir(),
 		"version": appVersion, "update_repo": effectiveRepo(), "default_repo": defaultUpdateRepo, "hasGitHubToken": cfg.GitHubToken != "",
 		"auto_update": auto, "just_updated": justUpdated, "can_self_update": canSelfUpdate,
 	}
@@ -322,6 +333,9 @@ func newServer(addr string) http.Handler {
 				GHToken   *string `json:"github_token"`
 				ClearGH   bool    `json:"clear_github_token"`
 				Auto      *bool   `json:"auto_update"`
+				BoardsDir *string `json:"boards_dir"`
+				SchDir    *string `json:"schematics_dir"`
+				AutoSch   *bool   `json:"auto_schematic"`
 			}
 			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
 				apiErr(w, 400, "Settings couldn't be read.")
@@ -400,6 +414,27 @@ func newServer(addr string) http.Handler {
 			if in.Accent != nil {
 				cfg.Accent = *in.Accent
 			}
+			for _, f := range []struct {
+				v    *string
+				dst  *string
+				what string
+			}{{in.BoardsDir, &cfg.BoardsDir, "boardview"}, {in.SchDir, &cfg.SchematicsDir, "schematic"}} {
+				if f.v == nil {
+					continue
+				}
+				d := strings.TrimSpace(*f.v)
+				if d != "" {
+					if st, err := os.Stat(d); err != nil || !st.IsDir() {
+						apiErr(w, 400, "The "+f.what+" folder doesn't exist: "+d)
+						return
+					}
+				}
+				*f.dst = d
+			}
+			if in.AutoSch != nil {
+				v := *in.AutoSch
+				cfg.AutoSchematic = &v
+			}
 			if in.XZZKey != nil {
 				cfg.XZZKey = *in.XZZKey
 			}
@@ -451,7 +486,7 @@ func newServer(addr string) http.Handler {
 			return
 		}
 		writeJSON(w, 200, map[string]bool{"ok": true})
-		go func() { time.Sleep(150 * time.Millisecond); shutdownBench(); os.Exit(0) }()
+		go func() { time.Sleep(150 * time.Millisecond); shutdownBench(); localAI.Stop(); os.Exit(0) }()
 	})
 
 	registerUpdateRoutes(mux)
@@ -483,6 +518,8 @@ func newServer(addr string) http.Handler {
 	registerModelsRoute(mux)
 	registerReadingRoutes(mux)
 	registerRecentRoutes(mux)
+	registerLibraryRoutes(mux)
+	registerLocalAIRoutes(mux)
 	registerInstrumentRoutes(mux)
 
 	// Guard: only this machine, only our page. Rejects DNS-rebinding hosts and cross-site API calls.
@@ -525,6 +562,8 @@ func main() {
 	url := fmt.Sprintf("http://%s/", addr)
 	log.Println("serving", url)
 	initBench()
+	go readings.migrateOnStart()
 	runWindow(url)
 	shutdownBench()
+	localAI.Stop()
 }

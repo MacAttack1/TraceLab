@@ -203,6 +203,21 @@ func registerRecentRoutes(mux *http.ServeMux) {
 				paths = append(paths, startup[i].path)
 				h.Write([]byte(strings.ToLower(startup[i].path)))
 			}
+		} else if lk := r.FormValue("lib_kind"); lk != "" { // opened from the Library: remember the path
+			root := libRoot(lk)
+			for _, rel := range r.MultipartForm.Value["lib_rel"] {
+				p := filepath.Join(root, filepath.FromSlash(rel))
+				if root == "" || !strings.HasPrefix(filepath.Clean(p), filepath.Clean(root)+string(os.PathSeparator)) {
+					continue
+				}
+				st, err := os.Stat(p)
+				if err != nil {
+					continue
+				}
+				files = append(files, recentFile{Name: filepath.Base(p), Size: st.Size()})
+				paths = append(paths, p)
+				h.Write([]byte(strings.ToLower(p)))
+			}
 		} else if r.MultipartForm != nil {
 			_ = os.MkdirAll(recentDir(), 0o700)
 			for _, fh := range r.MultipartForm.File["files"] {

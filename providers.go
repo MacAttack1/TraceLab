@@ -109,6 +109,23 @@ func registerAIProxy(mux *http.ServeMux) {
 			return
 		}
 
+		if provider == "local" {
+			cfgMu.Lock()
+			mdl, eng := cfg.LocalModel, cfg.LocalEngine
+			cfgMu.Unlock()
+			if mdl == "" {
+				apiErr(w, 428, "Choose and download an offline model in Settings → Offline AI first.")
+				return
+			}
+			lb, err := localAI.Ensure(mdl, eng, 0)
+			if err != nil {
+				apiErr(w, 503, err.Error())
+				return
+			}
+			url = chatCompletionsURL(lb)
+			forward(w, req())
+			return
+		}
 		if provider == "custom" && base == "" && os.Getenv("TRACELAB_AI_BASE") == "" {
 			apiErr(w, 428, "Set the base URL for your custom AI service in Settings (for example http://localhost:1234/v1).")
 			return

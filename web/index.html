@@ -87,6 +87,11 @@ dialog.wide{width:min(1000px,96vw)}
 .dbt button.x{border:0;background:none;color:var(--muted);cursor:pointer;font-size:14px}
 .dbt button.x:hover{color:var(--bad)}
 .dbt button.net{border:0;background:none;padding:0;font:inherit;color:var(--copper);cursor:pointer;text-decoration:underline}
+.pbar{height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin-top:6px}
+.pbar i{display:block;height:100%;width:0;background:var(--copper);transition:width .3s}
+.dbt tr.lib{cursor:pointer}
+.dbt tr.lib:hover td{background:var(--line)}
+.dbt tr.lib td:first-child{font-family:var(--f-mono)}
 .tour-hole{position:fixed;z-index:80;border-radius:8px;box-shadow:0 0 0 9999px rgba(4,10,12,.66);outline:2px solid var(--copper);pointer-events:none;transition:all .2s}
 .tour-card{position:fixed;z-index:81;width:min(380px,92vw);background:var(--rail);color:var(--fg);border:1px solid var(--line2);border-radius:10px;box-shadow:0 18px 50px rgba(0,0,0,.5);padding:16px 18px}
 .tour-card h3{margin:0 0 6px;font:600 16px var(--f-head)}
@@ -411,6 +416,7 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
   <div class="dropdown" id="menu-file" role="menu" hidden>
     <button role="menuitem" data-cmd="open-board">Open boardview…<span class="acc">Ctrl+O</span></button>
     <button role="menuitem" data-cmd="open-sch">Open schematic PDF…</button>
+    <button role="menuitem" data-cmd="library">Library…<span class="acc">Ctrl+L</span></button>
     <div class="sep"></div>
     <div class="mlabel">Open recent</div>
     <div id="recentMenu" style="display:contents"></div>
@@ -442,6 +448,8 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
     <button role="menuitem" data-cmd="guided">Guided diagnosis…</button>
     <button role="menuitem" data-cmd="ai-ask">Ask about selection</button>
     <button role="menuitem" data-cmd="ai-new">New chat</button>
+    <div class="sep"></div>
+    <button role="menuitem" data-cmd="offline-ai">Offline AI…</button>
   </div>
   <div class="dropdown" id="menu-bench" role="menu" hidden>
     <button role="menuitem" data-cmd="bench-setup">Instruments…</button>
@@ -464,6 +472,7 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
 <div class="toolbar">
   <button class="filebtn" id="tbOpenBoard">Open boardview</button>
   <button class="filebtn" id="tbOpenSch">Open schematic</button>
+  <button class="filebtn" id="tbLibrary" title="Your boardview and schematic folders (Ctrl+L)">Library</button>
   <div class="search">
     <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Find net or part  ( / )" aria-label="Find net or part">
     <div class="sugg" id="sugg" role="listbox" hidden></div>
@@ -557,6 +566,27 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
   </div>
   <div class="dlg-f"><button class="btn primary" type="button" id="instClose">Done</button></div>
 </dialog>
+<dialog id="aiLocalDlg" class="wide">
+  <div class="dlg-h">Offline AI<span class="spacer"></span><span class="foot" id="alServer"></span></div>
+  <div class="dlg-b">
+    <div id="alChoice"><p class="foot">Checking this PC…</p></div>
+    <div class="field"><span>Folder for AI models</span>
+      <div class="row2"><input id="alDir" spellcheck="false" style="flex:1;min-width:0"><button class="btn" type="button" id="alDirPick">Browse…</button><button class="btn" type="button" id="alDirSave">Use this folder</button><button class="btn" type="button" id="alReveal">Show in Explorer</button></div>
+      <small id="alFree"></small></div>
+    <div id="alProg" hidden><div class="foot" id="alProgT"></div><div class="pbar"><i id="alProgBar"></i></div></div>
+    <span class="st" id="alSt"></span>
+  </div>
+  <div class="dlg-f"><button class="btn" type="button" id="alRemove" hidden>Delete this model</button><span class="spacer"></span><button class="btn" type="button" id="alClose">Close</button><button class="btn" type="button" id="alPause" hidden>Pause download</button><button class="btn primary" type="button" id="alGo">Download</button></div>
+</dialog>
+<dialog id="libDlg" class="wide">
+  <div class="dlg-h">Library<span class="spacer"></span><div class="seg" id="libTabs" role="tablist"><button data-k="board" aria-pressed="true">Boardviews</button><button data-k="schematic" aria-pressed="false">Schematics</button></div></div>
+  <div class="dlg-b">
+    <div class="row2"><input id="libQ" type="search" placeholder="Search by model, board number or file name" style="flex:1;min-width:0" aria-label="Search the library"><button class="btn" type="button" id="libRefresh">Refresh</button></div>
+    <div class="foot" id="libRoot"></div>
+    <div class="dbwrap"><table class="dbt"><thead><tr><th>File</th><th>Folder</th><th>Modified</th><th>Size</th></tr></thead><tbody id="libRows"></tbody></table></div>
+  </div>
+  <div class="dlg-f"><button class="btn" type="button" id="libFolders">Change folders…</button><span class="spacer"></span><button class="btn primary" type="button" id="libClose">Close</button></div>
+</dialog>
 <dialog id="shotDlg" class="wide"><div class="dlg-h">Oscilloscope screen<span class="spacer"></span><button class="btn" type="button" id="shotClose">Close</button></div><div class="dlg-b"><img id="shotImg" alt="Oscilloscope screenshot" style="width:100%;border-radius:6px"></div></dialog>
 <dialog id="updDlg">
   <div class="dlg-h" id="updTitle">Update available</div>
@@ -587,7 +617,11 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
           <option value="gemini">Google Gemini</option>
           <option value="openrouter">OpenRouter (many models)</option>
           <option value="custom">Local or custom (OpenAI-compatible)</option>
+          <option value="local">Offline AI on this PC (free, built in)</option>
         </select></label>
+      <div class="field" id="sLocalWrap" hidden><span>Offline model</span>
+        <div class="row2"><span id="sLocalSt" class="foot" style="flex:1;min-width:0"></span><button class="btn" type="button" id="sLocalSetup">Choose or download…</button></div></div>
+      <div id="sCloudWrap" style="display:contents">
       <label class="field" id="sBaseWrap" hidden><span>Base URL</span>
         <input id="sBase" spellcheck="false" placeholder="http://localhost:1234/v1">
         <small>The OpenAI-compatible endpoint, e.g. LM Studio http://localhost:1234/v1 or Ollama http://localhost:11434/v1.</small></label>
@@ -600,6 +634,7 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
         <input id="sModel" spellcheck="false" placeholder="Type the exact model name" hidden>
         <span class="st" id="sModelSt"></span>
         <small id="sModelHint"></small></div>
+      </div>
 
       <div class="dlg-sec">Appearance</div>
       <label class="field"><span>Theme</span>
@@ -628,6 +663,18 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
         <input id="sDbDir" spellcheck="false" placeholder="G:\My Drive\Trace Lab"></label>
       <div class="field"><small id="sDbPath"></small>
         <div class="row2"><button class="btn" type="button" id="sDbOpen">Open database</button><button class="btn" type="button" id="sDbReveal">Show file in folder</button></div></div>
+
+      <div class="dlg-sec">Your files</div>
+      <label class="field"><span>Boardview folder</span>
+        <div class="row2"><input id="sBoardsDir" spellcheck="false" placeholder="e.g. D:\Repair\Boardviews" style="flex:1;min-width:0"><button class="btn" type="button" data-pick="sBoardsDir">Browse…</button></div>
+        <small>Trace Lab lists the boardviews in this folder (and its subfolders) under File → Library.</small></label>
+      <label class="field"><span>Schematic folder</span>
+        <div class="row2"><input id="sSchDir" spellcheck="false" placeholder="Leave empty if schematics are in the boardview folder" style="flex:1;min-width:0"><button class="btn" type="button" data-pick="sSchDir">Browse…</button></div></label>
+      <label class="chk"><input type="checkbox" id="sAutoSch" checked>Open the matching schematic automatically when I open a boardview</label>
+
+      <div class="dlg-sec">Offline AI</div>
+      <div class="field"><small id="sLocalInfo">Run a free AI model on this PC instead of a cloud service.</small>
+        <div class="row2"><button class="btn" type="button" id="sLocalOpen">Offline AI…</button></div></div>
 
       <div class="dlg-sec">Layout</div>
       <label class="field"><span>Split view</span>

@@ -1,6 +1,7 @@
 import { parseBoardFiles, NeedKeyError, FORMATS, parseKeyWords, checkRC6Key, parseHexKey64, checkXZZKey } from "./parsers.js";
 import { initAssistant } from "./ai.js";
 import { initBench } from "./bench.js";
+import { renderAIChoice, progressText, fmtGB } from "./aichoice.js";
 
 const $ = (s) => document.querySelector(s);
 const dpr = () => Math.min(window.devicePixelRatio || 1, 2.5);
@@ -812,6 +813,7 @@ $("#aiBubble").addEventListener("click", () => toggleAI(true));
 $("#guideBtn").addEventListener("click", () => app.assistant && app.assistant.guideCard());
 $("#tbOpenBoard").addEventListener("click", () => $("#fBoard").click());
 $("#tbOpenSch").addEventListener("click", () => $("#fSch").click());
+$("#tbLibrary").addEventListener("click", () => openLibrary());
 
 /* ---------------- menu bar ---------------- */
 let openMenu = null, openedAt = 0;
@@ -843,6 +845,7 @@ const MENU_CMDS = {
   "theme-system": () => saveTheme("system"), "theme-light": () => saveTheme("light"), "theme-dark": () => saveTheme("dark"),
   "ai-toggle": () => toggleAI(), "ai-new": () => $("#aiNew").click(), "ai-ask": () => app.assistant && app.assistant.askAboutSelection(),
   guided: () => app.assistant && app.assistant.guideCard(), sample: () => loadSample(),
+  library: () => openLibrary(), "offline-ai": () => openLocalAI(),
   "bench-setup": () => app.bench && app.bench.openSetup(), "bench-demo": () => app.bench && app.bench.addDemo(), "bench-bar": () => app.bench && app.bench.toggleBar(),
   "bench-show": (b) => app.bench && app.bench.toggleShow(b.dataset.id),
   "recent-open": (b) => openRecent(b.dataset.id), "recent-clear": async () => { await api("/api/recent", { method: "DELETE" }).catch(() => {}); recentCache = { items: [], last: {} }; toast("Recent files cleared."); },
@@ -867,6 +870,7 @@ document.addEventListener("click", (e) => { if (openMenu && !e.target.closest(".
 document.addEventListener("keydown", (e) => {
   if (e.target.closest("input,select,textarea")) { if (e.key === "Escape") closeMenus(); return; }
   if (e.ctrlKey && (e.key === "o" || e.key === "O")) { e.preventDefault(); $("#fBoard").click(); return; }
+  if (e.ctrlKey && (e.key === "l" || e.key === "L")) { e.preventDefault(); openLibrary(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === "/") { e.preventDefault(); q.focus(); }
   else if (e.key === "Escape") { if (openMenu) closeMenus(); else select(null); }
@@ -899,19 +903,20 @@ function setSch(sch) {
 }
 export async function openBoardBytes(files, meta = {}) {
   const prog = $("#bprog"); prog.hidden = false; prog.textContent = "Reading " + files[0].name + "…";
-  const keep = meta.recentId || meta.startup ? files : files.map((f) => ({ name: f.name, blob: new Blob([f.bytes]) })); // copy before parsing can detach the buffers
+  const keep = meta.recentId || meta.startup || meta.lib ? files : files.map((f) => ({ name: f.name, blob: new Blob([f.bytes]) })); // copy before parsing can detach the buffers
   try {
     await new Promise((r) => setTimeout(r, 10));
     const m = await parseBoardFiles(files, { fz: "", xzz: config.xzz_key, cae: config.cae_key, fzBuiltin: builtinKeys.fz, caeBuiltin: builtinKeys.cae });
     const b = finalizeBoard(m); setBoard(b);
     remember("board", keep, `${b.format} · ${b.parts.length} parts · ${b.nets.size} nets`, meta);
+    if (!meta.recentId && !meta.noMatch) autoSchematic(files[0].name);
     return true;
   } catch (err) { console.error(err); showError(err.message || "Couldn’t read that boardview file.", err instanceof NeedKeyError ? err.kind : null); return false; }
   finally { prog.hidden = true; }
 }
 export async function openSchBytes(bytes, name, meta = {}) {
-  const keep = [{ name, blob: meta.recentId || meta.startup ? null : new Blob([bytes]) }]; // pdf.js transfers (empties) the buffer, so copy it first
-  try { const sch = await loadPdf(bytes, name); setSch(sch); remember("schematic", keep, `${sch.pages.length} pages`, meta); return true; }
+  const keep = [{ name, blob: meta.recentId || meta.startup || meta.lib ? null : new Blob([bytes]) }]; // pdf.js transfers (empties) the buffer, so copy it first
+  try { const sch = await loadPdf(bytes, name); sch.auto = !!meta.auto; setSch(sch); remember("schematic", keep, `${sch.pages.length} pages`, meta); return true; }
   catch (err) { console.error(err); $("#sprog").hidden = true; showError("Couldn’t open that PDF: " + (err.message || err)); return false; }
 }
 
@@ -929,6 +934,7 @@ async function remember(kind, files, info, meta) {
     else {
       const fd = new FormData(); fd.append("kind", kind); fd.append("info", info || "");
       if (meta.startup) fd.append("startup", meta.startup.join(","));
+      else if (meta.lib) { fd.append("lib_kind", meta.lib.kind); meta.lib.rels.forEach((r) => fd.append("lib_rel", r)); }
       else files.forEach((f) => fd.append("files", f.blob || new Blob([f.bytes]), f.name));
       r = await api("/api/recent/add", { method: "POST", body: fd });
     }
@@ -966,7 +972,7 @@ async function showWelcome() {
   const fileRow = (e) => `<div class="wfile"><span class="ic ${e.kind === "board" ? "" : "pdf"}">${e.kind === "board" ? "BRD" : "PDF"}</span><div class="t"><b title="${esc(e.files.map((f) => f.name).join(", "))}">${esc(e.files[0].name)}${e.files.length > 1 ? ` +${e.files.length - 1}` : ""}</b><span>${esc(e.info || "")}${e.info ? " · " : ""}opened ${esc(ago(e.opened))}</span></div></div>`;
   const others = rc.items.filter((e) => e !== lb && e !== ls).slice(0, 6);
   const recentList = others.length ? `<div class="dlg-sec">Recent files</div><div class="wrecent">${others.map((e) => `<button data-recent="${esc(e.id)}"><span class="k">${e.kind === "board" ? "BRD" : "PDF"}</span><span class="n">${esc(e.files[0].name)}</span><span class="d">${esc(ago(e.opened))}</span></button>`).join("")}</div>` : "";
-  const openRow = `<div class="row2"><button class="btn" data-w="board">Open boardview…</button><button class="btn" data-w="sch">Open schematic…</button><span class="spacer"></span><button class="linkbtn" data-w="sample" style="margin:0">Try the sample board</button></div>`;
+  const openRow = `<div class="row2"><button class="btn" data-w="board">Open boardview…</button><button class="btn" data-w="sch">Open schematic…</button>${config.boards_dir ? `<button class="btn" data-w="library">Browse your library…</button>` : ""}<span class="spacer"></span><button class="linkbtn" data-w="sample" style="margin:0">Try the sample board</button></div>`;
   w.innerHTML = lb || ls ? `<div class="wcard" role="dialog" aria-labelledby="wH"><h2 id="wH">Pick up where you left off?</h2><p>Reopen the files you had open last time.</p>
       <div class="wfiles">${lb ? fileRow(lb) : ""}${ls ? fileRow(ls) : ""}</div>
       <div class="row2"><button class="btn primary" id="wReopen" data-w="reopen">Reopen ${lb && ls ? "both" : "it"}</button><button class="btn" data-w="empty">Start empty</button></div>${recentList}<div class="dlg-sec"></div>${openRow}</div>`
@@ -976,6 +982,7 @@ async function showWelcome() {
 $("#welcome").addEventListener("click", async (e) => {
   const r = e.target.closest("[data-recent]"); if (r) { await openRecent(r.dataset.recent); return; }
   const b = e.target.closest("[data-w]"); if (!b) return; const a = b.dataset.w;
+  if (a === "library") { openLibrary(); return; }
   if (a === "reopen") reopenLast(); else if (a === "empty") hideWelcome(); else if (a === "board") $("#fBoard").click(); else if (a === "sch") $("#fSch").click(); else if (a === "sample") { hideWelcome(); loadSample(); }
 });
 async function loadSample() {
@@ -989,7 +996,7 @@ async function loadSample() {
 async function filesToBytes(list) { return Promise.all([...list].map(async (f) => ({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) }))); }
 async function routeFiles(list) {
   const arr = [...list]; const pdfs = arr.filter((f) => /\.pdf$/i.test(f.name) || f.type === "application/pdf"); const rest = arr.filter((f) => !pdfs.includes(f));
-  if (rest.length) await openBoardBytes(await filesToBytes(rest));
+  if (rest.length) await openBoardBytes(await filesToBytes(rest), { noMatch: pdfs.length > 0 });
   if (pdfs.length) { const f = pdfs[0]; await openSchBytes(new Uint8Array(await f.arrayBuffer()), f.name); }
 }
 $("#fBoard").addEventListener("change", (e) => { if (e.target.files.length) routeFiles(e.target.files); e.target.value = ""; });
@@ -1007,7 +1014,7 @@ async function openStartupFiles() {
     const fetchF = async (f) => ({ name: f.name, bytes: new Uint8Array(await (await api("/api/file?id=" + f.id)).arrayBuffer()) });
     const bfs = s.files.filter((f) => f.kind === "board"); const boards = await Promise.all(bfs.map(fetchF));
     const pdf = s.files.find((f) => f.kind === "schematic");
-    if (boards.length) await openBoardBytes(boards, { startup: bfs.map((f) => f.id) });
+    if (boards.length) await openBoardBytes(boards, { startup: bfs.map((f) => f.id), noMatch: !!pdf });
     if (pdf) { const f = await fetchF(pdf); await openSchBytes(f.bytes, f.name, { startup: [pdf.id] }); }
     return boards.length > 0 || !!pdf;
   } catch (e) { console.warn(e); return false; }
@@ -1026,6 +1033,7 @@ export const PROVIDERS = {
     models: ["anthropic/claude-sonnet-4.5", "openai/gpt-4.1", "google/gemini-2.5-pro", "meta-llama/llama-3.3-70b-instruct"], def: "anthropic/claude-sonnet-4.5" },
   custom: { label: "your AI service", key: "API key (leave blank if the server needs none)", host: "your endpoint", getKey: "", vision: false,
     models: ["llama-3.1-8b-instruct", "qwen2.5-coder-7b-instruct"], def: "" },
+  local: { label: "Offline AI", key: "", host: "this PC", getKey: "", vision: true, models: [], def: "" },
 };
 const lsModel = (p) => { try { return localStorage.getItem("tl.model." + p) || ""; } catch (e) { return ""; } };
 const setLsModel = (p, m) => { try { localStorage.setItem("tl.model." + p, m); } catch (e) {} };
@@ -1075,6 +1083,8 @@ $("#sModelSel").addEventListener("change", () => { const v = $("#sModelSel").val
 $("#sModel").addEventListener("input", showModelHint);
 function syncProvider(initial) {
   const p = $("#sProvider").value, info = PROVIDERS[p] || PROVIDERS.anthropic;
+  $("#sCloudWrap").hidden = p === "local"; $("#sLocalWrap").hidden = p !== "local"; $("#sCloudWrap").style.display = p === "local" ? "none" : "contents";
+  if (p === "local") { localStatusText().then((t) => ($("#sLocalSt").textContent = t)); return; }
   const hasKey = !!(config.keyProviders && config.keyProviders[p]);
   $("#sKeyLabel").textContent = p === "custom" ? "API key (optional)" : info.label + " API key";
   $("#sKey").placeholder = hasKey ? "Key saved. Type a new one to replace it." : info.key;
@@ -1108,6 +1118,8 @@ export function openSettings() {
   document.querySelectorAll("#sAccent .sw").forEach((b) => b.setAttribute("aria-pressed", b.dataset.accent === accent));
   document.querySelectorAll("#sSplitSeg button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.dir === splitDir));
   syncDbSettings();
+  $("#sBoardsDir").value = config.boards_dir || ""; $("#sSchDir").value = config.schematics_dir || ""; $("#sAutoSch").checked = config.auto_schematic !== false;
+  localStatusText().then((t) => ($("#sLocalInfo").textContent = t));
   $("#sRepo").value = config.update_repo || ""; $("#sGh").value = ""; $("#sGh").placeholder = config.hasGitHubToken ? "Token saved. Type a new one to replace it." : "github_pat_…";
   $("#sAuto").checked = config.auto_update !== false; $("#sUpdSt").textContent = ""; $("#sUpdSt").className = "st";
   $("#sVer").textContent = "Trace Lab " + (config.version || "");
@@ -1162,15 +1174,18 @@ const currentMode = () => (document.querySelector("#sThemeSeg button[aria-presse
 const currentAccent = () => (document.querySelector("#sAccent .sw[aria-pressed=true]") || {}).dataset?.accent || "copper";
 dlg.addEventListener("close", async () => {
   if (dlg.returnValue !== "save") { applyAppearance(config.theme_mode, config.accent); return; } // revert live preview on cancel
-  const provider = $("#sProvider").value, model = $("#sModel").value.trim();
+  const provider = $("#sProvider").value, model = provider === "local" ? config.local_model || "" : $("#sModel").value.trim();
+  if (provider === "local" && !model) { toast("Download an offline model first (Settings → Offline AI…). The AI service wasn't changed."); }
   setLsModel(provider, model);
   const body = { provider, model, base_url: $("#sBase").value.trim(), xzz_key: $("#sXzz").value.trim(), cae_key: $("#sCae").value.trim(),
-    theme_mode: currentMode(), accent: currentAccent(), readings_mode: $("#sDbMode").value, readings_dir: $("#sDbDir").value.trim() };
+    theme_mode: currentMode(), accent: currentAccent(), readings_mode: $("#sDbMode").value, readings_dir: $("#sDbDir").value.trim(),
+    boards_dir: $("#sBoardsDir").value.trim(), schematics_dir: $("#sSchDir").value.trim(), auto_schematic: $("#sAutoSch").checked };
+  if (provider === "local" && !model) { body.provider = config.provider; body.model = config.model; }
   const k = $("#sKey").value.trim(); if (k) body.api_key = k;
   body.update_repo = $("#sRepo").value.trim(); body.auto_update = $("#sAuto").checked;
   const gh = $("#sGh").value.trim(); if (gh) body.github_token = gh;
   const prevPath = (config.readings || {}).path;
-  Object.assign(config, { provider, model, base_url: body.base_url, xzz_key: body.xzz_key, cae_key: body.cae_key, theme_mode: body.theme_mode, accent: body.accent });
+  Object.assign(config, { provider: body.provider, model: body.model, base_url: body.base_url, xzz_key: body.xzz_key, cae_key: body.cae_key, theme_mode: body.theme_mode, accent: body.accent });
   applyAppearance(config.theme_mode, config.accent);
   if (hasBackend) {
     try {
@@ -1224,6 +1239,151 @@ $("#dbRows").addEventListener("click", async (e) => {
 $("#dbExport").addEventListener("click", async () => { const r = await api("/api/readings/export", { method: "POST" }); const j = await r.json().catch(() => ({})); toast(r.ok ? "Exported to " + j.path : "Export failed: " + ((j.error && j.error.message) || r.status)); });
 $("#dbReveal").addEventListener("click", () => api("/api/readings/reveal").catch(() => {}));
 $("#dbClose").addEventListener("click", () => dbDlg.close());
+
+/* ---------------- folders: picker, library, matching schematic ---------------- */
+async function pickFolder(title, start) {
+  try { const r = await api("/api/pickfolder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, start }) }); const j = await r.json(); if (!r.ok) throw new Error((j.error && j.error.message) || "HTTP " + r.status); return j.path || ""; }
+  catch (e) { toast("Type the folder path into the box instead (" + e.message + ")."); return ""; }
+}
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-pick]"); if (!b) return; const inp = $("#" + b.dataset.pick);
+  const p = await pickFolder(b.dataset.pick === "sSchDir" ? "Choose your schematic folder" : b.dataset.pick === "alDir" ? "Choose where to keep AI models" : "Choose your boardview folder", inp.value); if (p) { inp.value = p; inp.dispatchEvent(new Event("input")); }
+});
+const libDlg = $("#libDlg"); let libKind = "board", libT = 0;
+export async function openLibrary(kind) {
+  if (!hasBackend) { toast("The library needs the Trace Lab desktop app."); return; }
+  if (!config.boards_dir && !config.schematics_dir) { openSettings(); setTimeout(() => { $("#sBoardsDir").focus(); $("#sBoardsDir").scrollIntoView({ block: "center" }); }, 60); toast("Choose your boardview and schematic folders first."); return; }
+  libKind = kind || libKind; document.querySelectorAll("#libTabs button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.k === libKind));
+  if (!libDlg.open) libDlg.showModal(); $("#libQ").focus(); loadLibrary();
+}
+async function loadLibrary(refresh) {
+  const rows = $("#libRows"); rows.innerHTML = `<tr><td colspan="4" class="foot">Reading the folder…</td></tr>`;
+  try {
+    const r = await api(`/api/library?kind=${libKind}&q=${encodeURIComponent($("#libQ").value.trim())}${refresh ? "&refresh=1" : ""}`); const j = await r.json(); if (!r.ok) throw new Error((j.error && j.error.message) || "HTTP " + r.status);
+    $("#libRoot").textContent = j.root ? `${j.total} ${libKind === "board" ? "boardview" : "schematic"} file${j.total === 1 ? "" : "s"} in ${j.root}${j.total > j.files.length ? ` (showing the newest ${j.files.length}; search to narrow it down)` : ""}` : "No folder chosen.";
+    rows.innerHTML = j.files.length ? j.files.map((f) => `<tr class="lib" data-rel="${esc(f.rel)}" tabindex="0"><td>${esc(f.name)}</td><td class="foot">${esc(f.dir === "." ? "" : f.dir)}</td><td>${esc(fmtTime(f.mod))}</td><td>${esc(fmtGB(f.size))}</td></tr>`).join("")
+      : `<tr><td colspan="4" class="foot">${$("#libQ").value ? "Nothing matches that search." : "No " + (libKind === "board" ? "boardview" : "schematic PDF") + " files in this folder."}</td></tr>`;
+  } catch (e) { rows.innerHTML = `<tr><td colspan="4" class="err-msg">${esc(e.message)}</td></tr>`; }
+}
+async function libFetch(kind, rel) { const r = await api(`/api/library/file?kind=${kind}&rel=${encodeURIComponent(rel)}`); if (!r.ok) throw new Error(rel + " couldn't be read."); return new Uint8Array(await r.arrayBuffer()); }
+export async function openFromLibrary(kind, rel) {
+  const name = rel.split("/").pop();
+  try {
+    const bytes = await libFetch(kind, rel);
+    if (kind === "board" && !/\.pdf$/i.test(name)) await openBoardBytes([{ name, bytes }], { lib: { kind, rels: [rel] } });
+    else await openSchBytes(bytes, name, { lib: { kind, rels: [rel] } });
+  } catch (e) { toast(e.message); }
+}
+$("#libRows").addEventListener("click", (e) => { const tr = e.target.closest("tr[data-rel]"); if (!tr) return; libDlg.close(); openFromLibrary(libKind, tr.dataset.rel); });
+$("#libRows").addEventListener("keydown", (e) => { if (e.key === "Enter") { const tr = e.target.closest("tr[data-rel]"); if (tr) tr.click(); } });
+$("#libQ").addEventListener("input", () => { clearTimeout(libT); libT = setTimeout(loadLibrary, 200); });
+$("#libQ").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); const tr = $("#libRows tr[data-rel]"); if (tr) tr.click(); } });
+$("#libTabs").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; libKind = b.dataset.k; document.querySelectorAll("#libTabs button").forEach((x) => x.setAttribute("aria-pressed", x === b)); loadLibrary(); });
+$("#libRefresh").addEventListener("click", () => loadLibrary(true));
+$("#libClose").addEventListener("click", () => libDlg.close());
+$("#libFolders").addEventListener("click", () => { libDlg.close(); openSettings(); setTimeout(() => $("#sBoardsDir").scrollIntoView({ block: "center" }), 60); });
+// After a boardview opens, look for its schematic in the schematic folder (by model / board number).
+async function autoSchematic(boardName) {
+  if (!hasBackend || config.auto_schematic === false || !(config.schematics_dir || config.boards_dir)) return;
+  if (S.sch && !S.sch.sample && !S.sch.auto) return; // the user picked a schematic themselves
+  try {
+    const r = await api("/api/library/match?name=" + encodeURIComponent(boardName)); const j = await r.json(); const m = (j.matches || [])[0];
+    if (!m || m.score < 8 || (j.matches[1] && j.matches[1].score === m.score && j.matches[1].name !== m.name)) {
+      if (m && m.score >= 8) toast(`Several schematics could match ${boardName}. Pick one in File → Library → Schematics.`);
+      return;
+    }
+    if (S.sch && S.sch.name === m.name) return;
+    const bytes = await libFetch("schematic", m.rel);
+    if (await openSchBytes(bytes, m.name, { lib: { kind: "schematic", rels: [m.rel] }, auto: true })) toast(`Opened the matching schematic: ${m.name}`);
+  } catch (e) { console.warn("auto schematic", e); }
+}
+
+/* ---------------- offline AI (llama.cpp + Gemma 4 on this PC) ---------------- */
+const alDlg = $("#aiLocalDlg"); let alData = null, alState = {}, alTimer = 0;
+const MODEL_NAME = (id) => ((alData && alData.advice.models.find((m) => m.id === id)) || {}).name || id;
+async function localInfo() { const r = await api("/api/localai"); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }
+async function localStatusText() {
+  if (!hasBackend) return "Offline AI needs the Trace Lab desktop app.";
+  try {
+    alData = await localInfo(); const sel = alData.selected; const have = (alData.installed || []).map((x) => x.id);
+    if (alData.progress && alData.progress.running) return progressText(alData.progress);
+    if (sel && have.includes(sel)) return `${MODEL_NAME(sel)} is downloaded${config.provider === "local" ? " and is Flux's AI service" : ""}.`;
+    if (have.length) return `${have.length} model${have.length > 1 ? "s" : ""} downloaded. Choose one to use.`;
+    return "Not set up. Download a free model that runs on this PC: no account, no cost, works offline.";
+  } catch (e) { return "Couldn't check: " + e.message; }
+}
+export async function openLocalAI() {
+  if (!hasBackend) { toast("Offline AI needs the Trace Lab desktop app."); return; }
+  if (dlg.open) dlg.close("cancel");
+  if (!alDlg.open) alDlg.showModal();
+  $("#alSt").textContent = "";
+  try { alData = await localInfo(); } catch (e) { $("#alChoice").innerHTML = `<p class="err-msg">${esc(e.message)}</p>`; return; }
+  alState = { model: alData.selected || alData.advice.recommended, engine: alData.engine || alData.advice.engine };
+  renderAIChoice($("#alChoice"), alData, alState, { onChange: syncLocalButtons });
+  $("#alDir").value = alData.dir; syncLocalButtons(); pollLocal();
+}
+function syncLocalButtons() {
+  if (!alData) return; const have = (alData.installed || []).some((x) => x.id === alState.model); const p = alData.progress || {};
+  const using = config.provider === "local" && config.local_model === alState.model;
+  $("#alGo").textContent = p.running ? "Downloading…" : have ? (using ? "In use" : "Use this model") : "Download " + MODEL_NAME(alState.model).split(" · ")[0];
+  $("#alGo").disabled = !!p.running || (have && using); $("#alRemove").hidden = !have || p.running; $("#alPause").hidden = !p.running;
+  $("#alFree").textContent = `${fmtGB(alData.free || 0)} free on this drive. ${((alData.installed || []).length ? "Downloaded: " + alData.installed.map((x) => `${MODEL_NAME(x.id)} (${fmtGB(x.bytes)})`).join(", ") + "." : "")}`;
+  const sv = alData.server || {}; $("#alServer").textContent = sv.state === "running" ? `Running: ${MODEL_NAME(sv.model)}${sv.cpu ? " (on the processor)" : ""}` : sv.state === "starting" ? "Loading…" : "";
+}
+async function pollLocal() {
+  clearTimeout(alTimer); if (!alDlg.open) return;
+  try {
+    const d = await localInfo(); const was = alData && alData.progress && alData.progress.running; const hadSizes = !!(alData && alData.sizes); alData = Object.assign(alData || {}, d);
+    if (!hadSizes && d.sizes) renderAIChoice($("#alChoice"), alData, alState, { onChange: syncLocalButtons });
+    const p = d.progress || {}; $("#alProg").hidden = !p.running && !p.error && !p.finished;
+    $("#alProgT").textContent = p.error ? p.error : progressText(p); $("#alProgT").className = p.error ? "err-msg" : "foot";
+    $("#alProgBar").style.width = (p.total ? Math.floor((p.done / p.total) * 100) : p.finished ? 100 : 3) + "%";
+    if (was && !p.running) { renderAIChoice($("#alChoice"), alData, alState, { onChange: syncLocalButtons }); if (p.finished) await useLocal(alState.model, true); }
+    syncLocalButtons();
+  } catch (e) {}
+  alTimer = setTimeout(pollLocal, alData && alData.progress && alData.progress.running ? 500 : 2500);
+}
+async function useLocal(model, afterDownload) {
+  const r = await api("/api/localai/use", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, engine: alState.engine }) }); const j = await r.json().catch(() => ({}));
+  if (!r.ok) { $("#alSt").className = "st bad"; $("#alSt").textContent = (j.error && j.error.message) || "Couldn't switch."; return; }
+  Object.assign(config, j); $("#alSt").className = "st ok"; $("#alSt").textContent = `✓ ${afterDownload ? "Downloaded. " : ""}Flux now uses ${MODEL_NAME(model)} on this PC.`;
+  toast(`Flux now uses ${MODEL_NAME(model)}, running offline on this PC.`); app.assistant && app.assistant.refresh(); syncLocalButtons();
+  api("/api/localai/start", { method: "POST" }).catch(() => {}); // warm it up
+}
+$("#alGo").addEventListener("click", async () => {
+  const have = (alData.installed || []).some((x) => x.id === alState.model);
+  if (have) { await useLocal(alState.model); return; }
+  const r = await api("/api/localai/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: alState.model, engine: alState.engine }) }); const j = await r.json().catch(() => ({}));
+  if (!r.ok) { $("#alSt").className = "st bad"; $("#alSt").textContent = (j.error && j.error.message) || "Couldn't start the download."; return; }
+  alData.progress = j; syncLocalButtons(); pollLocal();
+});
+$("#alPause").addEventListener("click", () => api("/api/localai/cancel", { method: "POST" }));
+$("#alRemove").addEventListener("click", async (e) => {
+  const b = e.currentTarget; if (!b.dataset.sure) { b.dataset.sure = "1"; b.textContent = "Delete " + MODEL_NAME(alState.model).split(" · ")[0] + "?"; b.classList.add("primary"); return; }
+  delete b.dataset.sure; b.textContent = "Delete this model"; b.classList.remove("primary");
+  await api("/api/localai/remove?model=" + encodeURIComponent(alState.model), { method: "POST" }); alData = await localInfo(); renderAIChoice($("#alChoice"), alData, alState, { onChange: syncLocalButtons }); syncLocalButtons();
+  $("#alSt").className = "st"; $("#alSt").textContent = "Deleted.";
+});
+$("#alDirPick").addEventListener("click", async () => { const p = await pickFolder("Choose where to keep AI models", $("#alDir").value); if (p) $("#alDir").value = p; });
+$("#alDirSave").addEventListener("click", async () => {
+  const r = await api("/api/localai/dir", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dir: $("#alDir").value.trim() }) }); const j = await r.json().catch(() => ({}));
+  $("#alSt").className = "st " + (r.ok ? "ok" : "bad"); $("#alSt").textContent = r.ok ? `✓ AI models will be kept in ${j.dir}. Models already downloaded elsewhere stay where they are.` : (j.error && j.error.message) || "Couldn't use that folder.";
+  if (r.ok) { alData = await localInfo(); config.models_dir = alData.dir; renderAIChoice($("#alChoice"), alData, alState, { onChange: syncLocalButtons }); syncLocalButtons(); }
+});
+$("#alReveal").addEventListener("click", () => api("/api/localai/reveal", { method: "POST" }));
+$("#alClose").addEventListener("click", () => alDlg.close());
+$("#sLocalSetup").addEventListener("click", () => openLocalAI());
+$("#sLocalOpen").addEventListener("click", () => openLocalAI());
+
+// The setup wizard can hand an unfinished model download over to the app: carry on in the background.
+async function resumeLocalDownload() {
+  if (!hasBackend || !config.local_model) return;
+  try {
+    const d = await localInfo(); if ((d.installed || []).some((x) => x.id === config.local_model) || (d.progress && d.progress.running)) return;
+    const r = await api("/api/localai/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: config.local_model, engine: config.local_engine }) });
+    if (r.ok) toast("Finishing the offline AI download in the background. Flux → Offline AI shows the progress.");
+  } catch (e) {}
+}
 
 /* ---------------- split direction ---------------- */
 let splitDir = "side";
@@ -1341,7 +1501,7 @@ $("#sCheck").addEventListener("click", async () => {
 export const app = {
   S, sv, config, api, hasBackend, select, selectByName, searchAll, expand, isSeries, sortedHits, getReadings, renderRegion,
   focusBoardOn, focusSchOn, gotoPage, setLayout, setSide, openSettings, reqB, reqS, onSelect, onBoardChange, esc, PROVIDERS, applyAppearance,
-  startTour, openDbDialog, setSplitDir, get splitDir() { return splitDir; }, saveReadingFor, toast, toggleAI, openRecent, bench: null,
+  startTour, openDbDialog, setSplitDir, openLocalAI, openLibrary, get splitDir() { return splitDir; }, saveReadingFor, toast, toggleAI, openRecent, bench: null,
   captureBoard(maxW = 1400) {
     drawBoard(); const W = bc.width, H = bc.height; const s = Math.min(1, maxW / W); const c = document.createElement("canvas");
     c.width = Math.round(W * s); c.height = Math.round(H * s); c.getContext("2d").drawImage(bc, 0, 0, c.width, c.height); return c;
@@ -1373,6 +1533,7 @@ toggleAI(aiPref === "1");
   if (hasBackend) app.bench = initBench(app); else $("#benchBar").hidden = true;
   app.assistant = initAssistant(app);
   const opened = await openStartupFiles();
+  resumeLocalDownload();
   // Open empty, and offer to reopen the last files (or start with the sample when there's no backend).
   if (!opened) { if (hasBackend) await showWelcome(); else await loadSample(); }
   renderInspector(); updatePageSel();

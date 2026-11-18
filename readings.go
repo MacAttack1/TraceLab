@@ -177,6 +177,21 @@ func (s *readingsStore) relocate(oldPath string) error {
 	return s.save()
 }
 
+// migrateOnStart brings readings from the default local file into the chosen location when the
+// setup wizard picked OneDrive or another folder (the app only moves them itself from Settings).
+func (s *readingsStore) migrateOnStart() {
+	local := filepath.Join(dataDir(), "readings.json")
+	if strings.EqualFold(local, currentReadingsPath()) {
+		return
+	}
+	if _, err := os.Stat(local); err != nil {
+		return
+	}
+	if err := s.relocate(local); err == nil {
+		_ = os.Rename(local, local+".moved")
+	}
+}
+
 func liveCount(nets map[string]Reading) int {
 	n := 0
 	for _, r := range nets {

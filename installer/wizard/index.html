@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="tl-token" content="{{TOKEN}}">
+<title>Trace Lab Setup</title>
+<style>
+:root{
+  --bg:#0b1214; --rail:#10191c; --pane:#091013; --line:#1f2f35; --line2:#2b4048;
+  --fg:#d5e0e2; --muted:#7f959a; --copper:#e39250; --copper-ink:#161008; --copper-soft:color-mix(in srgb,#e39250 18%,transparent);
+  --ok:#5fd29a; --warn:#e8c45a; --bad:#f07070;
+  --f-ui:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,Arial,sans-serif;
+  --f-head:"Segoe UI Variable Display","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+  --f-mono:"Cascadia Mono",Consolas,ui-monospace,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.5 var(--f-ui);display:grid;grid-template-columns:250px minmax(0,1fr);overflow:hidden}
+button,input,select{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--copper);outline-offset:2px}
+[hidden]{display:none!important}
+aside{background:var(--rail);border-right:1px solid var(--line);padding:26px 20px;display:flex;flex-direction:column;gap:22px}
+.brand{display:flex;align-items:center;gap:10px;font:600 18px var(--f-head)}
+.brand svg{width:30px;height:30px}
+.steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.steps li{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:7px;color:var(--muted);font-size:13.5px}
+.steps li .n{width:22px;height:22px;border-radius:50%;border:1.5px solid var(--line2);display:grid;place-items:center;font:600 11px var(--f-ui);flex:none}
+.steps li.cur{color:var(--fg);background:var(--line)}
+.steps li.cur .n{border-color:var(--copper);color:var(--copper)}
+.steps li.done .n{background:var(--copper);border-color:var(--copper);color:var(--copper-ink)}
+aside .ver{margin-top:auto;font-size:12px;color:var(--muted)}
+main{display:flex;flex-direction:column;min-height:0}
+.page{flex:1;overflow:auto;padding:30px 36px 20px;display:flex;flex-direction:column;gap:18px}
+h1{margin:0;font:600 26px/1.2 var(--f-head);text-wrap:balance}
+h2{margin:0;font:600 15px var(--f-head)}
+p{margin:0}
+.lead{color:var(--muted);font-size:14.5px;max-width:68ch}
+.feat{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:10px}
+.feat div{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--rail)}
+.feat b{display:block;font-size:13.5px;margin-bottom:2px}
+.feat span{font-size:12.5px;color:var(--muted)}
+.field{display:flex;flex-direction:column;gap:6px}
+.field>span{font-weight:600;font-size:13.5px}
+.field small,.hint{color:var(--muted);font-size:12.5px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+input[type=text]{flex:1;min-width:0;height:34px;border:1px solid var(--line2);border-radius:6px;background:var(--pane);padding:0 10px;font-family:var(--f-mono);font-size:13px}
+.btn{height:34px;padding:0 14px;border:1px solid var(--line2);border-radius:6px;background:none;cursor:pointer;font-weight:500;font-size:13.5px;white-space:nowrap}
+.btn:hover{border-color:var(--copper)}
+.btn.primary{background:var(--copper);border-color:var(--copper);color:var(--copper-ink);font-weight:600}
+.btn:disabled{opacity:.5;cursor:default}
+.chk{display:flex;gap:9px;align-items:flex-start;cursor:pointer;font-size:13.5px}
+.chk input{accent-color:var(--copper);margin-top:4px}
+.chk small{display:block;color:var(--muted);font-size:12.5px}
+.opts{display:flex;flex-direction:column;gap:8px}
+.opt{display:flex;gap:12px;align-items:flex-start;border:1.5px solid var(--line2);border-radius:10px;padding:12px 14px;cursor:pointer;background:var(--rail)}
+.opt:hover{border-color:var(--copper)}
+.opt.on{border-color:var(--copper);box-shadow:0 0 0 2px var(--copper-soft)}
+.opt input{accent-color:var(--copper);margin-top:4px}
+.opt b{display:block}
+.opt span{font-size:12.5px;color:var(--muted)}
+.opt code{font:12px var(--f-mono);color:var(--fg);word-break:break-all}
+.sum{display:grid;grid-template-columns:200px 1fr;gap:8px 16px;font-size:13.5px;border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:var(--rail)}
+.sum dt{color:var(--muted)}
+.sum dd{margin:0;font-family:var(--f-mono);font-size:12.5px;word-break:break-all}
+.prog{display:flex;flex-direction:column;gap:10px}
+.ps{display:flex;gap:12px;align-items:flex-start;border:1px solid var(--line);border-radius:10px;padding:11px 14px;background:var(--rail)}
+.ps .ic{width:22px;height:22px;border-radius:50%;border:2px solid var(--line2);flex:none;display:grid;place-items:center;font-size:12px;font-weight:700}
+.ps.doing .ic{border-color:var(--copper);border-top-color:transparent;animation:spin 1s linear infinite}
+.ps.done .ic{background:var(--ok);border-color:var(--ok);color:var(--bg)}
+.ps.skipped .ic{border-color:var(--warn);color:var(--warn)}
+.ps.error .ic{border-color:var(--bad);color:var(--bad)}
+.ps .t{flex:1;min-width:0}
+.ps .t span{display:block;font-size:12.5px;color:var(--muted);word-break:break-word}
+.ps.error .t span{color:var(--bad)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.pbar{height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin-top:7px}
+.pbar i{display:block;height:100%;width:0;background:var(--copper);transition:width .3s}
+footer{display:flex;align-items:center;gap:10px;padding:14px 36px;border-top:1px solid var(--line);background:var(--rail)}
+footer .msg{flex:1;color:var(--bad);font-size:13px}
+.free{font-size:12.5px;color:var(--muted)}
+.free.low{color:var(--warn)}
+.big{font-size:44px;line-height:1}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><rect x=".5" y=".5" width="31" height="31" rx="7.5" fill="#0e2a2e"/><path d="M12 5 H20 M13.8 5.2 V11.5 L7 23.5 Q6 26 9 26 H23 Q26 26 25 23.5 L18.2 11.5 V5.2" fill="none" stroke="#f0a060" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="19" cy="21" r="2.4" fill="#e9fdff"/><circle cx="16" cy="14.5" r="1.1" fill="#4ccae2"/></svg>Trace Lab</div>
+  <ol class="steps" id="steps"></ol>
+  <div class="ver" id="ver"></div>
+</aside>
+<main>
+  <div class="page" id="page"></div>
+  <footer><span class="msg" id="msg" role="alert"></span><button class="btn" id="back">Back</button><button class="btn primary" id="next">Next</button></footer>
+</main>
+<script type="module">
+import { renderAIChoice, progressText, fmtGB } from "./aichoice.js";
+const $ = (s) => document.querySelector(s);
+const TOKEN = document.querySelector('meta[name="tl-token"]').content;
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+async function call(path, body) {
+  const r = await fetch(path, body === undefined ? { headers: { "X-TL-Token": TOKEN } } : { method: "POST", headers: { "X-TL-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error((j.error && j.error.message) || "HTTP " + r.status); return j;
+}
+const info = await call("/api/info");
+let aiData = null; const aiState = { model: undefined, engine: "" };
+const C = { install_dir: info.install_dir, desktop: info.desktop, open_with: true, readings_mode: info.readings_mode || "local", readings_dir: info.readings_dir || "",
+  boards_dir: info.boards_dir || "", schematics_dir: info.schematics_dir || "", same_folder: !info.schematics_dir, auto_schematic: info.auto_schematic,
+  models_dir: info.models_dir, use_local: !info.has_cloud };
+if (info.local_model) { aiState.model = info.local_model; aiState.engine = info.local_engine; }
+const update = !!info.previous;
+$("#ver").textContent = `Version ${info.version}${update ? ` · updating from ${info.previous}` : ""}`;
+const loadAI = async () => { try { aiData = await call("/api/ai?dir=" + encodeURIComponent(C.models_dir)); } catch (e) { aiData = { error: e.message }; } return aiData; };
+loadAI(); setTimeout(loadAI, 4000); // second pass picks up real download sizes
+
+async function pick(title, start) {
+  try { const j = await call("/api/pick", { title, start }); return j.path || ""; }
+  catch (e) { $("#msg").textContent = "Type the folder path instead (" + e.message + ")."; return ""; }
+}
+const folderRow = (id, val, ph, btn = "Browse…") => `<div class="row"><input type="text" id="${id}" value="${esc(val)}" placeholder="${esc(ph)}" spellcheck="false"><button class="btn" data-pick="${id}">${btn}</button>${id !== "install_dir" && id !== "models_dir" ? `<button class="btn" data-clear="${id}" title="Clear">Clear</button>` : ""}</div>`;
+const sep = info.install_dir.includes("\\") ? "\\" : "/";
+const odPath = info.onedrive ? info.onedrive + sep + "Trace Lab" + sep + "readings.json" : "";
+
+const PAGES = [
+  { id: "welcome", title: "Welcome", render: () => `
+    <h1>${update ? `Update Trace Lab to ${esc(info.version)}` : "Install Trace Lab"}</h1>
+    <p class="lead">${update ? "Your settings, API keys and saved readings are kept. You can review where things are stored and set up the free offline AI on the next pages." : "A boardview and schematic viewer for motherboard repair, with Flux, an AI repair assistant. It installs for your Windows account only, so no administrator rights are needed."}</p>
+    <div class="feat">
+      <div><b>Board + schematic, linked</b><span>Click a net on the board to find it in the schematic, and the other way round. Subnets follow rails through series parts.</span></div>
+      <div><b>Flux, your repair assistant</b><span>Reads the board, the schematic and your readings, and walks you through probing step by step.</span></div>
+      <div><b>Free offline AI</b><span>Optionally download a free model that runs on this PC: no account, no cost, works without internet.</span></div>
+      <div><b>Bench instruments</b><span>Connect a multimeter, power supply or scope over USB or the network and Flux uses the readings live.</span></div>
+    </div>
+    ${info.platform_note ? `<p class="hint">${esc(info.platform_note)}</p>` : ""}` },
+  { id: "where", title: "Install location", render: () => `
+    <h1>Where should Trace Lab go?</h1>
+    <label class="field"><span>Install folder</span>${folderRow("install_dir", C.install_dir, "C:\\Users\\you\\AppData\\Local\\Programs\\Trace Lab", "Browse…")}<small>The default needs no administrator rights. Trace Lab itself is about 15 MB.</small></label>
+    <label class="chk"><input type="checkbox" id="desktop" ${C.desktop ? "checked" : ""}><span>Add a desktop shortcut<small>A Start menu shortcut is always added.</small></span></label>
+    <label class="chk"><input type="checkbox" id="open_with" ${C.open_with ? "checked" : ""}><span>Offer “Open with Trace Lab” for boardview files<small>Adds Trace Lab to the right-click menu for .brd, .bdv, .fz, .cad and other boardviews. Your current default programs aren't changed.</small></span></label>`,
+    read: () => { C.install_dir = $("#install_dir").value.trim(); C.desktop = $("#desktop").checked; C.open_with = $("#open_with").checked; if (!C.install_dir) return "Choose an install folder."; } },
+  { id: "data", title: "Your data", render: () => `
+    <h1>Where should your readings be kept?</h1>
+    <p class="lead">The readings database holds every diode, voltage and resistance value you save and which nets you marked known-good or faulty. Flux uses it to compare boards. Your settings always stay in <code>${esc(info.config_dir)}</code>.</p>
+    <div class="opts" id="rmode">
+      <label class="opt ${C.readings_mode === "local" ? "on" : ""}"><input type="radio" name="rm" value="local" ${C.readings_mode === "local" ? "checked" : ""}><div><b>This PC only</b><span>Simplest. Stored in your user profile. Not backed up unless you back up that folder.</span></div></label>
+      <label class="opt ${C.readings_mode === "onedrive" ? "on" : ""}" ${info.onedrive ? "" : 'style="opacity:.5;cursor:default"'}><input type="radio" name="rm" value="onedrive" ${C.readings_mode === "onedrive" ? "checked" : ""} ${info.onedrive ? "" : "disabled"}><div><b>OneDrive${info.onedrive ? "" : " (not set up on this PC)"}</b><span>Backed up to the cloud and shared with Trace Lab on your other PCs.${odPath ? ` <code>${esc(odPath)}</code>` : ""}</span></div></label>
+      <label class="opt ${C.readings_mode === "custom" ? "on" : ""}"><input type="radio" name="rm" value="custom" ${C.readings_mode === "custom" ? "checked" : ""}><div style="flex:1;min-width:0"><b>Another folder</b><span>Google Drive, Dropbox, a network drive or a USB stick.</span>
+        <div style="margin-top:8px" ${C.readings_mode === "custom" ? "" : "hidden"} id="rdirWrap">${folderRow("readings_dir", C.readings_dir, "G:\\My Drive\\Trace Lab")}</div></div></label>
+    </div>
+    <p class="hint">You can change this later in Settings → Readings database; existing readings move with it.</p>`,
+    after: () => { document.querySelectorAll("#rmode input[name=rm]").forEach((r) => r.addEventListener("change", () => { C.readings_mode = r.value; document.querySelectorAll("#rmode .opt").forEach((o) => o.classList.toggle("on", o.contains(document.querySelector("#rmode input:checked")))); $("#rdirWrap").hidden = C.readings_mode !== "custom"; })); },
+    read: () => { const r = document.querySelector("#rmode input:checked"); C.readings_mode = r ? r.value : "local"; C.readings_dir = $("#readings_dir").value.trim(); if (C.readings_mode === "custom" && !C.readings_dir) return "Choose the folder for your readings."; } },
+  { id: "files", title: "Your files", render: () => `
+    <h1>Where are your boardviews and schematics?</h1>
+    <p class="lead">Optional. Trace Lab lists these folders under File → Library so you can search by model or board number, and opens the matching schematic when you open a boardview.</p>
+    <label class="field"><span>Boardview folder</span>${folderRow("boards_dir", C.boards_dir, "e.g. D:\\Repair\\Boardviews")}</label>
+    <label class="chk"><input type="checkbox" id="same_folder" ${C.same_folder ? "checked" : ""}><span>My schematics are in the same folder</span></label>
+    <label class="field" id="schWrap" ${C.same_folder ? "hidden" : ""}><span>Schematic folder</span>${folderRow("schematics_dir", C.schematics_dir, "e.g. D:\\Repair\\Schematics")}</label>
+    <label class="chk"><input type="checkbox" id="auto_schematic" ${C.auto_schematic ? "checked" : ""}><span>Open the matching schematic automatically<small>Matches model and board numbers in the file names, e.g. X580VD_REV2.0.fz ↔ ASUS X580VD rev 2.0.pdf, or 820-00165.brd ↔ 820-00165-A.pdf.</small></span></label>`,
+    after: () => $("#same_folder").addEventListener("change", (e) => ($("#schWrap").hidden = e.target.checked)),
+    read: () => { C.boards_dir = $("#boards_dir").value.trim(); C.same_folder = $("#same_folder").checked; C.schematics_dir = C.same_folder ? "" : $("#schematics_dir").value.trim(); C.auto_schematic = $("#auto_schematic").checked; } },
+  { id: "ai", title: "Offline AI", render: () => `
+    <h1>Do you want a free AI that runs on this PC?</h1>
+    <p class="lead">Flux needs an AI model to think with. You can download one here that runs entirely on this PC, or skip this and use a cloud service with your own key later (Claude, OpenAI, Gemini, OpenRouter). You can change your mind any time in Settings.</p>
+    <div id="aiChoice"><p class="hint">Checking this PC's graphics card and memory…</p></div>
+    <div id="aiMore">
+      <label class="field"><span>Folder for AI models</span>${folderRow("models_dir", C.models_dir, "D:\\AI models")}<span class="free" id="free"></span></label>
+      <label class="chk"><input type="checkbox" id="use_local" ${C.use_local ? "checked" : ""}><span>Make it Flux's AI service${info.has_cloud ? "<small>You already have a cloud AI key set up. Tick this to switch Flux to the offline model.</small>" : ""}</span></label>
+    </div>`,
+    after: async () => {
+      const draw = () => {
+        if (!aiData) return; if (aiData.error) { $("#aiChoice").innerHTML = `<p class="hint">Couldn't check this PC: ${esc(aiData.error)}</p>`; return; }
+        renderAIChoice($("#aiChoice"), aiData, aiState, { allowNone: true, onChange: sync }); sync();
+      };
+      const sync = () => {
+        $("#aiMore").hidden = aiState.model === "none";
+        const need = aiData && aiData.sizes && aiData.sizes[aiState.model] ? aiData.sizes[aiState.model] : ((aiData && aiData.advice.models.find((m) => m.id === aiState.model)) || { approx_gb: 0 }).approx_gb * 1073741824;
+        const free = aiData ? aiData.free : 0; const f = $("#free");
+        f.textContent = free ? `${fmtGB(free)} free on this drive${need ? `; the model needs ${fmtGB(need)}` : ""}.` : ""; f.className = "free" + (free && need > free ? " low" : "");
+        if (free && need > free) f.textContent += " Not enough space: choose a folder on another drive.";
+      };
+      if (!aiData || !aiData.advice) await loadAI(); draw();
+      for (let i = 0; i < 6 && !(aiData && aiData.sizes) && PAGES[cur].id === "ai"; i++) { await new Promise((r) => setTimeout(r, 2000)); await loadAI(); if (aiData.sizes && PAGES[cur].id === "ai") draw(); } // real sizes from Hugging Face
+      $("#models_dir").addEventListener("change", async () => { C.models_dir = $("#models_dir").value.trim(); await loadAI(); draw(); });
+    },
+    read: () => {
+      if (aiState.model === undefined) return "Choose a model, or “No offline AI for now”.";
+      if (aiState.model !== "none") { C.models_dir = $("#models_dir").value.trim(); C.use_local = $("#use_local").checked; if (!C.models_dir) return "Choose a folder for the AI models."; }
+    } },
+  { id: "ready", title: "Ready", render: () => {
+    const m = aiData && aiData.advice ? aiData.advice.models.find((x) => x.id === aiState.model) : null;
+    const eng = aiData && aiData.advice ? (aiData.advice.engines.find((e) => e.id === aiState.engine) || {}).name : "";
+    const size = m ? (aiData.sizes && aiData.sizes[m.id] ? fmtGB(aiData.sizes[m.id]) : "about " + m.approx_gb + " GB") : "";
+    const rd = C.readings_mode === "onedrive" ? "OneDrive" : C.readings_mode === "custom" ? C.readings_dir : "This PC";
+    return `<h1>Ready to ${update ? "update" : "install"}</h1>
+    <dl class="sum"><dt>Install to</dt><dd>${esc(C.install_dir)}</dd><dt>Shortcuts</dt><dd>Start menu${C.desktop ? ", desktop" : ""}${C.open_with ? ", “Open with” for boardviews" : ""}</dd>
+      <dt>Readings database</dt><dd>${esc(rd)}</dd><dt>Boardviews</dt><dd>${esc(C.boards_dir || "Not set")}</dd><dt>Schematics</dt><dd>${esc(C.same_folder ? (C.boards_dir ? "Same folder" : "Not set") : C.schematics_dir || "Not set")}</dd>
+      <dt>Offline AI</dt><dd>${m ? `${esc(m.name)} on ${esc(eng)} · ${esc(size)} download to ${esc(C.models_dir)}${C.use_local ? " · used by Flux" : ""}` : "None (set up later in Settings if you like)"}</dd></dl>
+    ${m ? `<p class="hint">The AI download starts after Trace Lab is installed. If you don't want to wait, click “Finish later” and Trace Lab finishes it in the background the next time it opens.</p>` : ""}`; } },
+  { id: "install", title: update ? "Updating" : "Installing", render: () => `<h1 id="ih">${update ? "Updating" : "Installing"} Trace Lab…</h1><div class="prog" id="prog"></div>` },
+  { id: "done", title: "Finish", render: () => `<div class="big">✓</div><h1>${update ? "Trace Lab is up to date" : "Trace Lab is installed"}</h1>
+    <p class="lead" id="doneText"></p><label class="chk"><input type="checkbox" id="launch" checked><span>Open Trace Lab now</span></label>` },
+];
+let cur = 0;
+function show(i) {
+  cur = i; const pg = PAGES[i]; $("#msg").textContent = "";
+  $("#steps").innerHTML = PAGES.filter((p) => p.id !== "install").map((p, k) => { const idx = PAGES.indexOf(p); return `<li class="${idx === i || (pg.id === "install" && p.id === "done" && false) ? "cur" : idx < i ? "done" : ""}"><span class="n">${idx < i ? "✓" : k + 1}</span>${esc(p.title)}</li>`; }).join("");
+  $("#page").innerHTML = pg.render(); $("#page").scrollTop = 0;
+  $("#back").hidden = i === 0 || pg.id === "install" || pg.id === "done";
+  $("#next").textContent = pg.id === "ready" ? (update ? "Update" : "Install") : pg.id === "done" ? "Finish" : pg.id === "install" ? "Finish later" : pg.id === "welcome" ? (update ? "Review settings" : "Next") : "Next";
+  $("#next").disabled = false; $("#next").hidden = pg.id === "install";
+  if (pg.after) pg.after();
+  const f = $("#page input[type=text]"); if (f && pg.id !== "install") setTimeout(() => f.focus(), 30);
+}
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-pick]"); if (b) { const inp = $("#" + b.dataset.pick); const p = await pick("Choose a folder", inp.value); if (p) { inp.value = p; inp.dispatchEvent(new Event("change")); } return; }
+  const c = e.target.closest("[data-clear]"); if (c) { $("#" + c.dataset.clear).value = ""; }
+});
+$("#back").addEventListener("click", () => show(Math.max(0, cur - 1)));
+$("#next").addEventListener("click", async () => {
+  const pg = PAGES[cur];
+  if (pg.id === "install") return; // handled by the progress page's own buttons
+  if (pg.id === "done") { $("#next").disabled = true; await call("/api/finish?launch=" + ($("#launch") && $("#launch").checked ? 1 : 0), {}); $("#page").innerHTML = `<h1>You can close this window.</h1>`; return; }
+  if (pg.read) { const err = pg.read(); if (err) { $("#msg").textContent = err; return; } }
+  if (pg.id === "ready") { await startInstall(); return; }
+  show(cur + 1);
+});
+async function startInstall() {
+  const body = Object.assign({}, C, { model: aiState.model === "none" ? "" : aiState.model || "", engine: aiState.engine });
+  if (body.same_folder) body.schematics_dir = "";
+  $("#next").disabled = true;
+  try { await call("/api/install", body); } catch (e) { $("#msg").textContent = e.message; $("#next").disabled = false; return; }
+  show(PAGES.findIndex((p) => p.id === "install")); poll();
+}
+async function poll() {
+  let p; try { p = await call("/api/progress"); } catch (e) { setTimeout(poll, 800); return; }
+  const icon = { done: "✓", error: "!", skipped: "–" };
+  $("#prog").innerHTML = p.steps.map((s, i) => { const ai = i === 3 && p.ai; const live = ai && s.state === "doing";
+    return `<div class="ps ${esc(s.state)}"><span class="ic">${icon[s.state] || ""}</span><div class="t"><b>${esc(s.label)}</b><span>${esc(live ? progressText(p.ai) : s.detail || "")}</span>
+      ${live ? `<div class="pbar"><i style="width:${p.ai.total ? Math.floor((p.ai.done / p.ai.total) * 100) : 2}%"></i></div><span>Step ${p.ai.step} of ${p.ai.steps}: engine, model, image reader. If you click Finish later, Trace Lab carries on with it in the background when you open it.</span>` : ""}</div></div>`; }).join("");
+  const aiRunning = p.steps[3] && p.steps[3].state === "doing";
+  const coreDone = p.steps.slice(0, 3).every((s) => s.state === "done");
+  if (aiRunning && coreDone) { $("#next").hidden = false; $("#next").disabled = false; $("#next").textContent = "Finish later"; $("#next").onclick = async (ev) => { ev.stopImmediatePropagation(); $("#next").disabled = true; await call("/api/later", {}); }; }
+  if (!p.done) { setTimeout(poll, 400); return; }
+  $("#next").onclick = null;
+  if (p.error) { $("#ih").textContent = "Setup couldn't finish"; $("#msg").textContent = p.error; $("#next").hidden = false; $("#next").textContent = "Close"; $("#next").disabled = false; $("#next").onclick = async (ev) => { ev.stopImmediatePropagation(); await call("/api/finish?launch=0", {}); window.close(); }; return; }
+  show(PAGES.findIndex((x) => x.id === "done"));
+  const st = p.steps[3];
+  $("#doneText").textContent = !st ? "Open it from the Start menu any time. Flux can use a cloud AI service with your own key, or download a free offline model from Settings → Offline AI."
+    : st.state === "done" ? "The offline AI is downloaded and ready. Click the Flux bubble in the corner to start; the first answer takes a moment while the model loads."
+    : st.state === "skipped" ? "Trace Lab will finish downloading the offline AI in the background when you open it, continuing where it stopped. You can use everything else meanwhile."
+    : "The offline AI didn't finish downloading (" + (st.detail || "error") + ")";
+}
+show(0);
+</script>
+</body>
+</html>

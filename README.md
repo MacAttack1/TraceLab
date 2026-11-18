@@ -24,6 +24,17 @@ Windows 10/11 (64-bit).
   text-streaming meters; Rigol DP800, Siglent SPD, Korad/Tenma/Velleman and SCPI supplies; Rigol DS1000Z /
   MSO5000 / DHO, Siglent SDS and Keysight InfiniiVision scopes; plus demo instruments to try it without
   hardware. Trace Lab only reads the power supply; it never changes its output.
+- **Offline AI (free, optional)**: download a model that runs on your own PC, with no account or cost and
+  nothing sent to the internet. Trace Lab detects your graphics card and memory, recommends a model and
+  explains the trade-offs. The engine is [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT licence) in
+  its Vulkan build (any NVIDIA, AMD or Intel graphics), CUDA build (NVIDIA) or CPU build; the models are
+  Google's Gemma 4 (E2B, E4B, 26B-A4B, 31B) from the ggml-org Hugging Face organisation, used under Google's
+  terms shown on each model page. Downloads resume after interruptions and are checked against their SHA-256.
+  Settings → Offline AI to download, switch or delete models.
+- **Setup wizard**: choose the install folder, where the readings database lives (this PC, OneDrive or any
+  folder), your boardview and schematic folders, and whether to download an offline AI model.
+- **Library** (File → Library, Ctrl+L): search your boardview and schematic folders; opening a boardview
+  opens its matching schematic automatically (matched by model or board number in the file names).
 - Opens empty and offers to reopen your last board and schematic; File → Open recent.
 - Theme (system/light/dark), accent colour and split direction in Settings.
 

@@ -2,7 +2,7 @@
 
 // Trace Lab installer. Per-user install (no admin rights) to %LOCALAPPDATA%\Programs\Trace Lab.
 //
-//	TraceLab-Setup.exe              interactive install / update
+//	TraceLab-Setup.exe              setup wizard (install location, data, folders, offline AI)
 //	TraceLab-Setup.exe /S           silent install (used by the in-app updater)
 //	TraceLab-Setup.exe /S /relaunch silent install, then start Trace Lab
 //	"Uninstall Trace Lab.exe" /uninstall [/S]
@@ -22,6 +22,7 @@ import (
 
 	ole "github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
+	webview2 "github.com/jchv/go-webview2"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -29,7 +30,7 @@ import (
 //go:embed payload/TraceLab.exe
 var payload []byte
 
-var appVersion = "1.4.0" // -X main.appVersion
+var appVersion = "1.5.0" // -X main.appVersion
 
 const (
 	appName     = "Trace Lab"
@@ -65,6 +66,13 @@ func msg(text string, flags uintptr) int {
 }
 
 func installDir() string {
+	if k, err := registry.OpenKey(registry.CURRENT_USER, uninstKey, registry.QUERY_VALUE); err == nil { // keep an existing install where it is
+		loc, _, _ := k.GetStringValue("InstallLocation")
+		k.Close()
+		if loc != "" {
+			return loc
+		}
+	}
 	base := os.Getenv("LOCALAPPDATA")
 	if base == "" {
 		base, _ = os.UserConfigDir()
@@ -104,7 +112,90 @@ func main() {
 		uninstall(silent)
 		return
 	}
+	if !silent && runWizard() {
+		return
+	}
 	install(silent, has(args, "/relaunch", "--relaunch"))
+}
+
+// ---- setup wizard ----
+
+type winPlatform struct{}
+
+func (winPlatform) installDir() string       { return installDir() }
+func (winPlatform) installedVersion() string { return installedVersion() }
+func (winPlatform) hasDesktopShortcut() bool { return fileExists(desktopLink()) }
+func (winPlatform) note() string             { return "" }
+func (winPlatform) launch(dir string)        { _ = exec.Command(filepath.Join(dir, exeName)).Start() }
+
+func (winPlatform) copyFiles(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("couldn't create the install folder: %v", err)
+	}
+	exe := filepath.Join(dir, exeName)
+	if err := writeWithRetry(exe, payload, 30*time.Second); err != nil {
+		return fmt.Errorf("couldn't replace %s. Close Trace Lab and try again (%v)", exeName, err)
+	}
+	go func() { time.Sleep(3 * time.Second); _ = os.Remove(exe + ".old") }()
+	if self, err := os.Executable(); err == nil {
+		if b, err := os.ReadFile(self); err == nil {
+			_ = writeWithRetry(filepath.Join(dir, uninstName), b, 10*time.Second)
+		}
+	}
+	return nil
+}
+
+func (winPlatform) integrate(dir string, desktop, openWith bool) error {
+	exe := filepath.Join(dir, exeName)
+	err := withCOM(func() error {
+		if err := makeShortcut(startMenuLink(), exe, dir); err != nil {
+			return err
+		}
+		if desktop {
+			return makeShortcut(desktopLink(), exe, dir)
+		}
+		_ = os.Remove(desktopLink())
+		return nil
+	})
+	registerApp(dir, exe)
+	if !openWith {
+		unregisterFileTypes()
+	}
+	changeNtfy.Call(0x08000000, 0, 0, 0)
+	return err
+}
+
+// runWizard shows the setup wizard. It returns false if WebView2 isn't available, so the caller
+// falls back to the simple message-box install.
+func runWizard() bool {
+	url, run, err := serveWizard("0", winPlatform{})
+	if err != nil {
+		return false
+	}
+	tmp := filepath.Join(os.TempDir(), "TraceLabSetup")
+	w := webview2.NewWithOptions(webview2.WebViewOptions{
+		AutoFocus:     true,
+		DataPath:      filepath.Join(tmp, "WebView2"),
+		WindowOptions: webview2.WindowOptions{Title: appName + " Setup", Width: 1040, Height: 780, IconId: 2, Center: true},
+	})
+	if w == nil {
+		return false
+	}
+	go func() {
+		<-run.finish
+		w.Dispatch(func() { w.Terminate() })
+	}()
+	w.Navigate(url)
+	w.Run()
+	w.Destroy()
+	run.mu.Lock()
+	ai := run.ai
+	run.mu.Unlock()
+	if ai != nil {
+		ai.Cancel() // closing the window pauses the download; Trace Lab resumes it
+	}
+	_ = os.RemoveAll(tmp)
+	return true
 }
 
 func installedVersion() string {
@@ -211,6 +302,17 @@ func writeWithRetry(path string, data []byte, wait time.Duration) error {
 	}
 }
 
+func dirSize(root string) int64 {
+	var n int64
+	_ = filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			n += info.Size()
+		}
+		return nil
+	})
+	return n
+}
+
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 func withCOM(fn func() error) error {
@@ -288,14 +390,18 @@ func registerApp(dir, exe string) {
 	setStr(cu, `Software\Classes\Applications\`+exeName+`\SupportedTypes`, types)
 }
 
-func unregisterApp() {
-	cu := registry.CURRENT_USER
+func unregisterFileTypes() {
 	for _, e := range boardExts {
-		if k, err := registry.OpenKey(cu, `Software\Classes\`+e+`\OpenWithProgids`, registry.SET_VALUE); err == nil {
+		if k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Classes\`+e+`\OpenWithProgids`, registry.SET_VALUE); err == nil {
 			_ = k.DeleteValue(progID)
 			k.Close()
 		}
 	}
+}
+
+func unregisterApp() {
+	cu := registry.CURRENT_USER
+	unregisterFileTypes()
 	for _, p := range []string{
 		`Software\Classes\` + progID + `\shell\open\command`, `Software\Classes\` + progID + `\shell\open`, `Software\Classes\` + progID + `\shell`,
 		`Software\Classes\` + progID + `\DefaultIcon`, `Software\Classes\` + progID,
@@ -309,6 +415,9 @@ func unregisterApp() {
 
 func uninstall(silent bool) {
 	dir := installDir()
+	if self, err := os.Executable(); err == nil {
+		dir = filepath.Dir(self)
+	}
 	if !silent && msg("Remove "+appName+" from this PC?\n\nYour settings and API key in %APPDATA%\\TraceLab are kept. Delete that folder too if you want them gone.", mbYesNo|mbIconQuest) != idYes {
 		return
 	}
@@ -327,6 +436,14 @@ func uninstall(silent bool) {
 	_ = os.Remove(desktopLink())
 	unregisterApp()
 	changeNtfy.Call(0x08000000, 0, 0, 0)
+	// Offline AI models are large; offer to remove them too (settings and readings are always kept).
+	md := defaultModelsDir()
+	if v, ok := readAppConfig()["models_dir"].(string); ok && v != "" {
+		md = v
+	}
+	if n := dirSize(md); !silent && n > 50<<20 && msg(fmt.Sprintf("Also delete the downloaded offline AI models (%.1f GB)?\n\n%s", float64(n)/(1<<30), md), mbYesNo|mbIconQuest) == idYes {
+		_ = os.RemoveAll(md)
+	}
 	// This uninstaller lives in the folder it removes, so hand the last step to cmd.
 	cmd := exec.Command("cmd", "/C", "ping 127.0.0.1 -n 3 >nul & rmdir /s /q \""+dir+"\"")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000} // CREATE_NO_WINDOW

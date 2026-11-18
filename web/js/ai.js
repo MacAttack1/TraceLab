@@ -363,13 +363,14 @@ export function initAssistant(app) {
     boardId = id; renderCtx();
   });
   function emptyState() {
-    const ready = app.config.hasKey || app.config.provider === "custom";
-    log.innerHTML = `<div class="ai-empty"><h3>Hi, I'm Flux.</h3><div>Ask about a fault, a rail or a part. I read this board and its schematic, your saved readings, and any meter, supply or scope you connect.</div><div>Press <button class="btn" data-act="guide">Guided diagnosis</button> and I'll ask you to probe points one at a time and work out the fault from your readings.</div>${ready ? "" : `<div class="notice">Connect an AI service in <button class="btn" data-act="settings">Settings</button> to turn me on. Works with Claude, OpenAI, Gemini, OpenRouter or a local model.</div>`}</div>`;
+    const ready = app.config.hasKey || app.config.provider === "custom" || (app.config.provider === "local" && app.config.local_model);
+    log.innerHTML = `<div class="ai-empty"><h3>Hi, I'm Flux.</h3><div>Ask about a fault, a rail or a part. I read this board and its schematic, your saved readings, and any meter, supply or scope you connect.</div><div>Press <button class="btn" data-act="guide">Guided diagnosis</button> and I'll ask you to probe points one at a time and work out the fault from your readings.</div>${ready ? "" : `<div class="notice">Turn me on with a free <button class="btn" data-act="offline">Offline AI</button> model that runs on this PC, or connect a cloud service (Claude, OpenAI, Gemini, OpenRouter) in <button class="btn" data-act="settings">Settings</button>.</div>`}</div>`;
   }
   log.addEventListener("click", (e) => {
     const r = e.target.closest(".ref"); if (r) { app.selectByName(r.dataset.name); return; }
     if (e.target.closest("[data-act=settings]")) app.openSettings();
     if (e.target.closest("[data-act=guide]")) guideCard();
+    if (e.target.closest("[data-act=offline]")) app.openLocalAI();
   });
   input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(180, input.scrollHeight) + "px"; });
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
@@ -483,6 +484,7 @@ export function initAssistant(app) {
       const em = typeof eo.message === "string" ? eo.message : "";
       const code = String(eo.code || eo.status || eo.type || "");
       const who = providerLabel(); let msg = `The assistant request failed (HTTP ${r.status}).`; let settings = false, retry = false;
+      if (provider === "local") { const e = new Error(r.status === 428 ? em : "The offline AI couldn't answer: " + (em || "HTTP " + r.status)); e.local = true; throw e; }
       const quota = /insufficient_quota|billing|credit|exceeded your current quota|quota exceeded|RESOURCE_EXHAUSTED.*(day|daily)|per day/i.test(code + " " + em);
       if (r.status === 401 || r.status === 403) { msg = `${who} rejected the API key. Check it in Settings.`; settings = true; }
       else if (r.status === 428) { msg = em || `Set up the ${who} connection in Settings first.`; settings = true; }
@@ -588,7 +590,7 @@ export function initAssistant(app) {
     open(true);
     if (!app.hasBackend) { const d = addBot(); d.innerHTML = `<p class="err-msg">The assistant runs through the Trace Lab desktop app, which keeps your API key off the page. Open this page from TraceLab.exe.</p>`; return; }
     const prov = app.config.provider || "anthropic";
-    if (!app.config.hasKey && prov !== "custom") { const d = addBot(); d.innerHTML = `<p>Add your ${app.esc(providerLabel())} API key in <button class="btn" data-act="settings">Settings</button> first.</p>`; scroll(); return; }
+    if (!app.config.hasKey && prov !== "custom" && prov !== "local") { const d = addBot(); d.innerHTML = `<p>Add your ${app.esc(providerLabel())} API key in <button class="btn" data-act="settings">Settings</button> first.</p>`; scroll(); return; }
     if (!app.config.model) { const d = addBot(); d.innerHTML = `<p>Choose a model for ${app.esc(providerLabel())} in <button class="btn" data-act="settings">Settings</button> first.</p>`; scroll(); return; }
     if (!messages.length) log.innerHTML = "";
     if (!opts.keepInput) { input.value = ""; input.style.height = "auto"; } addUser(opts.display || text);
@@ -598,6 +600,7 @@ export function initAssistant(app) {
     let bubble = addBot(); curBubble = bubble;
     const maxTurns = opts.guided || /guided|probe|measure/i.test(text) ? 60 : 24;
     try {
+      if (prov === "local") await warmLocal(bubble, ctrl.signal);
       for (let turn = 0; turn < maxTurns; turn++) {
         const sink = makeSink(bubble); const sig = ctrl.signal;
         const res = await withRetry(() => (prov === "anthropic" ? streamAnthropic(sink, sig) : streamOpenAI(sink, sig, prov)), bubble, sig);
@@ -616,7 +619,7 @@ export function initAssistant(app) {
       }
     } catch (err) {
       if (err.name === "AbortError") appendNote(bubble, "Stopped.");
-      else { const p = document.createElement("p"); p.className = "err-msg"; p.innerHTML = app.esc(err.message || String(err)) + (err.settings ? ` <button class="btn" data-act="settings">Open Settings</button>` : ""); bubble.appendChild(p); }
+      else { const p = document.createElement("p"); p.className = "err-msg"; p.innerHTML = app.esc(err.message || String(err)) + (err.local ? ` <button class="btn" data-act="offline">Offline AI settings</button>` : err.settings ? ` <button class="btn" data-act="settings">Open Settings</button>` : ""); bubble.appendChild(p); }
       messages.length = base; // roll back so the next request is well-formed
     } finally {
       bubble.querySelectorAll(".tool.run").forEach((c) => c.classList.remove("run"));
@@ -624,6 +627,23 @@ export function initAssistant(app) {
       setBusy(false); ctrl = null; curBubble = null; curSignal = null; scroll();
       if (panel.hidden) { const dot = $("#aiDot"); if (dot) dot.hidden = false; }
     }
+  }
+  // The offline model takes a while to load into memory the first time; say so instead of looking stuck.
+  async function warmLocal(bubble, signal) {
+    let st = await (await app.api("/api/localai/start", { method: "POST" })).json().catch(() => ({}));
+    if (st.error && st.error.message) throw Object.assign(new Error(st.error.message), { local: true });
+    if (st.state === "running") return;
+    const note = document.createElement("p"); note.className = "foot"; bubble.appendChild(note); scroll();
+    const t0 = Date.now();
+    while (!signal.aborted) {
+      const d = await (await app.api("/api/localai")).json().catch(() => ({})); const sv = d.server || {};
+      if (sv.state === "running") { note.remove(); return; }
+      if (sv.state === "error" || sv.state === "stopped" && Date.now() - t0 > 4000) throw Object.assign(new Error("The offline AI couldn't start: " + (sv.error || "it stopped") + (sv.log_tail ? " — " + sv.log_tail.split("\n").pop() : "")), { local: true });
+      const name = ((d.advice && d.advice.models.find((m) => m.id === sv.model)) || {}).name || "the offline model";
+      note.textContent = `Loading ${name} on this PC${sv.cpu ? " (on the processor, because the graphics engine didn't start)" : ""}… ${Math.round((Date.now() - t0) / 1000)} s. The first answer after starting Trace Lab takes a little longer.`;
+      await new Promise((r) => setTimeout(r, 700));
+    }
+    throw Object.assign(new Error("Stopped"), { name: "AbortError" });
   }
   function appendNote(bubble, t) { const p = document.createElement("p"); p.className = "foot"; p.textContent = t; bubble.appendChild(p); }
 
