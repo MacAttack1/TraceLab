@@ -30,7 +30,7 @@ import (
 //go:embed payload/TraceLab.exe
 var payload []byte
 
-var appVersion = "1.5.0" // -X main.appVersion
+var appVersion = "1.5.1" // -X main.appVersion
 
 const (
 	appName     = "Trace Lab"

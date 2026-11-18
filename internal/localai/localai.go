@@ -362,13 +362,70 @@ type ghAsset struct {
 	Size int64  `json:"size"`
 }
 
-var cudaRe = regexp.MustCompile(`bin-win-cuda-([\d.]+)-x64\.zip$`)
+type ghRelease struct {
+	Tag    string    `json:"tag_name"`
+	Draft  bool      `json:"draft"`
+	Assets []ghAsset `json:"assets"`
+}
+
+var cudaRe = regexp.MustCompile(`cuda-?([\d.]+)`)
+
+// pickAssets finds the engine zip(s) for a variant in one release's assets, tolerating naming changes
+// (llama-b6500-bin-win-vulkan-x64.zip, llama-v1.2.0-bin-win-vulkan-x64.zip, …). CUDA also needs the
+// matching cudart runtime zip.
+func pickAssets(assets []ghAsset, variant, osTag string) []*ghAsset {
+	ok := func(n string) bool {
+		n = strings.ToLower(n)
+		return strings.HasSuffix(n, ".zip") && strings.Contains(n, "-"+osTag+"-") && (strings.Contains(n, "x64") || strings.Contains(n, "amd64")) && !strings.Contains(n, "arm64")
+	}
+	if variant == "cuda" {
+		var best *ghAsset
+		bestV := ""
+		for i := range assets {
+			n := strings.ToLower(assets[i].Name)
+			if !ok(n) || strings.HasPrefix(n, "cudart") {
+				continue
+			}
+			if mm := cudaRe.FindStringSubmatch(n); mm != nil && (best == nil || verLess(bestV, mm[1])) {
+				best, bestV = &assets[i], mm[1]
+			}
+		}
+		if best == nil {
+			return nil
+		}
+		out := []*ghAsset{best}
+		for i := range assets {
+			n := strings.ToLower(assets[i].Name)
+			if strings.HasPrefix(n, "cudart") && ok(n) && strings.Contains(n, "cuda-"+bestV) {
+				out = append(out, &assets[i])
+				break
+			}
+		}
+		return out
+	}
+	var best *ghAsset
+	for i := range assets {
+		n := strings.ToLower(assets[i].Name)
+		if !ok(n) || strings.HasPrefix(n, "cudart") || !strings.Contains(n, "-"+variant) {
+			continue
+		}
+		if best == nil || (strings.HasPrefix(n, "llama") && !strings.HasPrefix(strings.ToLower(best.Name), "llama")) {
+			best = &assets[i]
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	return []*ghAsset{best}
+}
 
 func (m *Manager) fetchEngine(ctx context.Context, variant string) error {
 	m.set(func(p *Progress) {
 		p.Phase, p.Label, p.Done, p.Total = "engine", "Finding the latest AI engine (llama.cpp)…", 0, 0
 	})
-	req, _ := http.NewRequestWithContext(ctx, "GET", ghAPI()+"/repos/ggml-org/llama.cpp/releases/latest", nil)
+	// Not just releases/latest: llama.cpp's stable "v1.x" releases can be source-only while its numbered
+	// builds (b1234) carry the binaries, so take the newest release that has the build we need.
+	req, _ := http.NewRequestWithContext(ctx, "GET", ghAPI()+"/repos/ggml-org/llama.cpp/releases?per_page=40", nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "TraceLab")
 	res, err := client.Do(req)
@@ -379,48 +436,27 @@ func (m *Manager) fetchEngine(ctx context.Context, variant string) error {
 	if res.StatusCode != 200 {
 		return fmt.Errorf("GitHub answered %s", res.Status)
 	}
-	var rel struct {
-		Tag    string    `json:"tag_name"`
-		Assets []ghAsset `json:"assets"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&rel); err != nil {
+	var rels []ghRelease
+	if err := json.NewDecoder(res.Body).Decode(&rels); err != nil {
 		return err
 	}
 	osTag := map[string]string{"windows": "win", "linux": "ubuntu", "darwin": "macos"}[runtime.GOOS]
-	pick := func(re *regexp.Regexp) *ghAsset {
-		for i := range rel.Assets {
-			if re.MatchString(rel.Assets[i].Name) {
-				return &rel.Assets[i]
-			}
-		}
-		return nil
-	}
+	var rel ghRelease
 	var want []*ghAsset
-	switch variant {
-	case "cuda":
-		var best *ghAsset
-		bestV := ""
-		for i := range rel.Assets {
-			if mm := cudaRe.FindStringSubmatch(rel.Assets[i].Name); mm != nil && strings.HasPrefix(rel.Assets[i].Name, "llama-") && (best == nil || verLess(bestV, mm[1])) {
-				best, bestV = &rel.Assets[i], mm[1]
-			}
+	for i := range rels {
+		if rels[i].Draft {
+			continue
 		}
-		if best == nil {
-			return errors.New("this release has no NVIDIA CUDA build; choose the graphics card (Vulkan) engine")
+		if w := pickAssets(rels[i].Assets, variant, osTag); len(w) > 0 {
+			rel, want = rels[i], w
+			break
 		}
-		want = append(want, best)
-		if rt := pick(regexp.MustCompile(`^cudart-.*-cuda-` + regexp.QuoteMeta(bestV) + `-x64\.zip$`)); rt != nil {
-			want = append(want, rt)
+	}
+	if len(want) == 0 {
+		if variant == "cuda" {
+			return errors.New("no recent llama.cpp release has an NVIDIA CUDA build; choose the graphics card (Vulkan) engine")
 		}
-	default:
-		a := pick(regexp.MustCompile(`^llama-.*-bin-` + osTag + `-` + variant + `-x64\.zip$`))
-		if a == nil && variant == "vulkan" {
-			a = pick(regexp.MustCompile(`^llama-.*-bin-` + osTag + `-vulkan.*x64\.zip$`))
-		}
-		if a == nil {
-			return fmt.Errorf("release %s has no %s build for this system", rel.Tag, variant)
-		}
-		want = append(want, a)
+		return fmt.Errorf("no recent llama.cpp release has a %s build for this system", variant)
 	}
 	dir := m.engineDir(variant)
 	tmpDir := dir + ".new"
