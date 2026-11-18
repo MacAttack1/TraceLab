@@ -29,7 +29,7 @@ const appName = "Trace Lab"
 const appID = "TraceLab" // folder, registry and user-agent name
 
 // Set at build time: -ldflags "-X main.appVersion=1.2.0 -X main.defaultUpdateRepo=owner/repo -X main.builtinFZKeyHex=<352 hex chars>"
-var appVersion = "1.2.1"
+var appVersion = "1.4.0"
 var defaultUpdateRepo = ""
 
 // builtinFZKeyHex is the ASUS FZ RC6 key as 44 concatenated 8-hex-digit words (352 chars), injected
@@ -48,10 +48,17 @@ type Config struct {
 	// Appearance
 	ThemeMode string `json:"theme_mode"` // system|light|dark
 	Accent    string `json:"accent"`     // copper|amber|blue|green|violet|rose|teal
+	SplitDir  string `json:"split_dir"`  // side|stack
+	// Readings database location: local (AppData) | onedrive | custom folder (e.g. Google Drive, Dropbox)
+	ReadingsMode string `json:"readings_mode"`
+	ReadingsDir  string `json:"readings_dir"`
+	TutorialDone bool   `json:"tutorial_done"`
 	// Updates
 	UpdateRepo  string `json:"update_repo"`
 	GitHubToken string `json:"github_token"`
 	AutoUpdate  *bool  `json:"auto_update"`
+	// Bench instruments (multimeter, power supply, oscilloscope)
+	Instruments []InstCfg `json:"instruments"`
 }
 
 const defaultModelAnthropic = "claude-sonnet-5-5"
@@ -172,7 +179,8 @@ func publicConfig() map[string]any {
 	}
 	return map[string]any{
 		"provider": prov, "model": cfg.Model, "base_url": cfg.BaseURL, "hasKey": providerKey(prov) != "", "keyProviders": keyset,
-		"xzz_key": cfg.XZZKey, "cae_key": cfg.CAEKey, "theme_mode": mode, "accent": accent,
+		"xzz_key": cfg.XZZKey, "cae_key": cfg.CAEKey, "theme_mode": mode, "accent": accent, "split_dir": cfg.SplitDir,
+		"readings": storageInfo(), "readings_dir": cfg.ReadingsDir, "tutorial_done": cfg.TutorialDone,
 		"version": appVersion, "update_repo": effectiveRepo(), "default_repo": defaultUpdateRepo, "hasGitHubToken": cfg.GitHubToken != "",
 		"auto_update": auto, "just_updated": justUpdated, "can_self_update": canSelfUpdate,
 	}
@@ -297,14 +305,18 @@ func newServer(addr string) http.Handler {
 		defer cfgMu.Unlock()
 		if r.Method == http.MethodPost {
 			var in struct {
-				APIKey   *string `json:"api_key"`
-				ClearKey bool    `json:"clear_key"`
-				Model    *string `json:"model"`
+				APIKey    *string `json:"api_key"`
+				ClearKey  bool    `json:"clear_key"`
+				Model     *string `json:"model"`
 				XZZKey    *string `json:"xzz_key"`
 				CAEKey    *string `json:"cae_key"`
 				Provider  *string `json:"provider"`
 				BaseURL   *string `json:"base_url"`
 				ThemeMode *string `json:"theme_mode"`
+				SplitDir  *string `json:"split_dir"`
+				RMode     *string `json:"readings_mode"`
+				RDir      *string `json:"readings_dir"`
+				Tutorial  *bool   `json:"tutorial_done"`
 				Accent    *string `json:"accent"`
 				Repo      *string `json:"update_repo"`
 				GHToken   *string `json:"github_token"`
@@ -342,6 +354,48 @@ func newServer(addr string) http.Handler {
 			}
 			if in.ThemeMode != nil {
 				cfg.ThemeMode = *in.ThemeMode
+			}
+			if in.SplitDir != nil {
+				cfg.SplitDir = *in.SplitDir
+			}
+			if in.Tutorial != nil {
+				cfg.TutorialDone = *in.Tutorial
+			}
+			if in.RMode != nil || in.RDir != nil {
+				mode, dir := cfg.ReadingsMode, cfg.ReadingsDir
+				if in.RMode != nil {
+					mode = *in.RMode
+				}
+				if in.RDir != nil {
+					dir = strings.TrimSpace(*in.RDir)
+				}
+				if mode != "onedrive" && mode != "custom" {
+					mode = "local"
+				}
+				if mode != cfg.ReadingsMode || (mode == "custom" && dir != cfg.ReadingsDir) {
+					target, err := readingsDirFor(mode, dir)
+					if err == nil {
+						err = os.MkdirAll(target, 0o700)
+					}
+					if err == nil { // prove we can write there before switching
+						probe := filepath.Join(target, ".tracelab-write-test")
+						if err = os.WriteFile(probe, []byte("ok"), 0o600); err == nil {
+							_ = os.Remove(probe)
+						}
+					}
+					if err != nil {
+						apiErr(w, 400, "The readings database can't be stored there: "+err.Error())
+						return
+					}
+					old := currentReadingsPath()
+					cfg.ReadingsMode, cfg.ReadingsDir = mode, dir
+					if err := readings.relocate(old); err != nil {
+						apiErr(w, 500, "Couldn't move the readings database: "+err.Error())
+						return
+					}
+				} else {
+					cfg.ReadingsDir = dir
+				}
 			}
 			if in.Accent != nil {
 				cfg.Accent = *in.Accent
@@ -397,7 +451,7 @@ func newServer(addr string) http.Handler {
 			return
 		}
 		writeJSON(w, 200, map[string]bool{"ok": true})
-		go func() { time.Sleep(150 * time.Millisecond); os.Exit(0) }()
+		go func() { time.Sleep(150 * time.Millisecond); shutdownBench(); os.Exit(0) }()
 	})
 
 	registerUpdateRoutes(mux)
@@ -426,7 +480,10 @@ func newServer(addr string) http.Handler {
 	})
 
 	registerAIProxy(mux)
+	registerModelsRoute(mux)
 	registerReadingRoutes(mux)
+	registerRecentRoutes(mux)
+	registerInstrumentRoutes(mux)
 
 	// Guard: only this machine, only our page. Rejects DNS-rebinding hosts and cross-site API calls.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -467,5 +524,7 @@ func main() {
 	go func() { _ = srv.Serve(ln) }()
 	url := fmt.Sprintf("http://%s/", addr)
 	log.Println("serving", url)
+	initBench()
 	runWindow(url)
+	shutdownBench()
 }

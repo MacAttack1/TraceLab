@@ -1,5 +1,6 @@
 import { parseBoardFiles, NeedKeyError, FORMATS, parseKeyWords, checkRC6Key, parseHexKey64, checkXZZKey } from "./parsers.js";
 import { initAssistant } from "./ai.js";
+import { initBench } from "./bench.js";
 
 const $ = (s) => document.querySelector(s);
 const dpr = () => Math.min(window.devicePixelRatio || 1, 2.5);
@@ -145,6 +146,7 @@ function getMST(net, side) {
 const selListeners = new Set();
 export function onSelect(fn) { selListeners.add(fn); }
 export function select(sel, opt = {}) {
+  if (isDirty() && (!sel || sel.type !== "net" || sel.name !== draftNet)) saveDraft(true); // keep unsaved readings
   const { focusBoard = true, focusSch = true, pin = -1 } = opt;
   S.sel = sel; S.pinSel = pin; S.hl = new Map(); S.hlSch = new Map(); S.tree = []; S.hitCursor = 0; mstCache.clear();
   if (sel) {
@@ -542,16 +544,63 @@ async function loadReadings() {
   }
   if (S.sel && S.sel.type === "net") renderInspector();
 }
-function setReading(net, field, val) {
-  const r = Object.assign({}, readingsCache[net] || {});
-  r[field] = val; r.updated = Date.now();
-  if (!r.status && !r.diode && !r.volts && !r.ohms && !r.note) delete readingsCache[net]; else readingsCache[net] = r;
-  if (hasBackend && S.board) {
-    const cur = readingsCache[net] || {};
-    api("/api/readings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ board: S.board.name, net, status: cur.status || "", diode: cur.diode || "", volts: cur.volts || "", ohms: cur.ohms || "", note: cur.note || "" }) }).catch(() => {});
-  } else {
-    try { localStorage.setItem(rKey(), JSON.stringify(readingsCache)); } catch (e) {}
-  }
+// Edits go into a draft for the selected net; "Save to database" writes it and confirms.
+// Moving to another net with unsaved edits saves them automatically so nothing is lost.
+let draft = null, draftNet = null, draftBoard = null, lastSave = { net: null, ok: false, msg: "" };
+const FIELDS = ["status", "diode", "volts", "ohms", "note"];
+const sameReading = (a, b) => FIELDS.every((f) => (a[f] || "") === (b[f] || ""));
+function draftFor(net) { if (draftNet !== net || draftBoard !== (S.board && S.board.name)) { draftNet = net; draftBoard = S.board && S.board.name; draft = Object.assign({}, readingsCache[net] || {}); } return draft; }
+const isDirty = () => draft && draftNet && !sameReading(draft, readingsCache[draftNet] || {});
+export const fmtTime = (t) => { if (!t) return ""; const d = new Date(t < 1e12 ? t * 1000 : t); return d.toLocaleDateString() === new Date().toLocaleDateString() ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString(); };
+async function saveDraft(quietNet) {
+  if (!draft || !draftNet || !draftBoard) return false;
+  const net = draftNet, board = draftBoard, rec = Object.assign({}, draft);
+  const payload = { board, net }; FIELDS.forEach((f) => (payload[f] = (rec[f] || "").trim ? (rec[f] || "").trim() : rec[f] || ""));
+  try {
+    if (hasBackend) {
+      const r = await api("/api/readings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((j.error && j.error.message) || "HTTP " + r.status);
+      if (board === (S.board && S.board.name)) { if (j.deleted) delete readingsCache[net]; else readingsCache[net] = Object.assign({}, j.saved); }
+      lastSave = { net, ok: true, msg: j.deleted ? "Readings cleared" : "Saved to database", at: Date.now() };
+      toast(j.deleted ? `Cleared readings for ${net}.` : `Saved ${net}${rec.status === "good" ? " as known good" : rec.status === "bad" ? " as a fault" : ""} to the readings database (${j.total} reading${j.total === 1 ? "" : "s"} stored).`);
+    } else {
+      if (sameReading(rec, {})) delete readingsCache[net]; else readingsCache[net] = Object.assign({ updated: Date.now() }, rec);
+      try { localStorage.setItem(rKey(), JSON.stringify(readingsCache)); } catch (e) {}
+      lastSave = { net, ok: true, msg: "Saved in this browser", at: Date.now() };
+    }
+    if (quietNet !== true && draftNet === net) draft = Object.assign({}, readingsCache[net] || {});
+    return true;
+  } catch (e) {
+    lastSave = { net, ok: false, msg: "Not saved: " + e.message };
+    toast(`${net} was NOT saved: ${e.message}`);
+    return false;
+  } finally { if (S.sel && S.sel.type === "net" && S.sel.name === net) updateReadingState(); }
+}
+function updateReadingState() {
+  const el = $("#rdState"), btn = $("#rdSave"); if (!el || !S.sel) return;
+  const net = S.sel.name, saved = readingsCache[net], dirty = isDirty() && draftNet === net;
+  if (dirty) { el.className = "rdstate dirty"; el.textContent = "Unsaved changes"; }
+  else if (lastSave.net === net && !lastSave.ok) { el.className = "rdstate bad"; el.textContent = lastSave.msg; }
+  else if (saved) { el.className = "rdstate ok"; el.textContent = `✓ Saved to database · ${fmtTime(saved.updated)}`; }
+  else { el.className = "rdstate"; el.textContent = "Nothing saved for this net yet"; }
+  if (btn) { btn.disabled = !dirty; btn.classList.toggle("primary", dirty); }
+}
+
+// Save one or more fields for a net without touching the others (used by Flux's probe requests).
+export async function saveReadingFor(net, patch) {
+  const board = S.board && S.board.name; if (!board || !hasBackend) return { ok: false };
+  const base = Object.assign({}, readingsCache[net] || {}, patch); const payload = { board, net };
+  FIELDS.forEach((f) => (payload[f] = String(base[f] || "").trim()));
+  try {
+    const r = await api("/api/readings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error((j.error && j.error.message) || "HTTP " + r.status);
+    if (board === (S.board && S.board.name)) { readingsCache[net] = Object.assign({}, j.saved); if (draftNet === net && !isDirty()) draft = Object.assign({}, readingsCache[net]); }
+    if (draftNet === net && draft) Object.keys(patch).forEach((k) => (draft[k] = readingsCache[net][k]));
+    lastSave = { net, ok: true, msg: "Saved to database", at: Date.now() };
+    if (S.sel && S.sel.type === "net" && S.sel.name === net) renderInspector();
+    return { ok: true, total: j.total };
+  } catch (e) { toast(`${net} reading was NOT saved: ${e.message}`); return { ok: false }; }
 }
 
 /* ---------------- inspector ---------------- */
@@ -575,18 +624,18 @@ export function renderInspector() {
       <li>Click a pin to select its net. Click a part’s body to select the part.</li>
       <li>Click a net name or designator in the schematic to find it on the board.</li>
       <li>Subnets follow a net through resistors, inductors, ferrites, fuses and jumpers.</li>
-      <li>Log diode-mode, voltage and resistance readings on any net. The assistant uses them.</li>
-      <li><span class="kbd">/</span> search · <span class="kbd">B</span> flip side · <span class="kbd">F</span> fit · <span class="kbd">A</span> assistant · <span class="kbd">Esc</span> clear</li></ol></div>
+      <li>Log diode-mode, voltage and resistance readings on any net. Flux, the repair assistant, uses them.</li>
+      <li><span class="kbd">/</span> search · <span class="kbd">B</span> flip side · <span class="kbd">F</span> fit · <span class="kbd">A</span> Flux · <span class="kbd">Esc</span> clear</li></ol></div>
       <div class="sec"><h3>Boardview formats</h3><ul class="fmtlist">${FORMATS.map(([n, e]) => `<li><b>${esc(e)}</b> ${esc(n)}</li>`).join("")}</ul></div>`;
     if (b && !b.sample) h += `<p class="foot">${esc(b.name)} · ${esc(b.format)} · ${b.parts.length} parts · ${b.nets.size} nets</p>`;
   } else if (sel.type === "net") {
     const pins = b ? b.nets.get(sel.name) || [] : []; const parts = new Set(pins.map((i) => b.pins[i].part));
     const top = pins.filter((i) => vis(b, b.pins[i], "T")).length, bot = pins.filter((i) => vis(b, b.pins[i], "B")).length, gnd = b && b.gnd.has(sel.name);
     const fromPin = S.pinSel >= 0 ? b.pins[S.pinSel] : null;
-    const rd = getReadings()[sel.name] || {};
+    const rd = draftFor(sel.name);
     h += `<div class="selh"><div class="kind">Net${gnd ? " · ground" : ""}</div><h2>${esc(sel.name)}</h2>
       <div class="meta">${pins.length} pins · ${parts.size} parts · top ${top} / bottom ${bot}</div>
-      <div class="row">${fromPin ? `<button class="btn" data-part="${esc(b.parts[fromPin.part].name)}">Part ${esc(b.parts[fromPin.part].name)} · pin ${esc(fromPin.num)}</button>` : ""}<button class="btn" data-act="ask">Ask assistant</button><button class="btn" data-act="clear">Clear</button></div></div>
+      <div class="row">${fromPin ? `<button class="btn" data-part="${esc(b.parts[fromPin.part].name)}">Part ${esc(b.parts[fromPin.part].name)} · pin ${esc(fromPin.num)}</button>` : ""}<button class="btn" data-act="ask">Ask Flux</button><button class="btn" data-act="probe" title="Flux asks you to probe points and diagnoses from the readings">Probe with Flux</button><button class="btn" data-act="clear">Clear</button></div></div>
       <div class="sec"><h3>Your readings${rd.status === "good" ? ` <span class="tag good">known good</span>` : rd.status === "bad" ? ` <span class="tag bad">fault</span>` : ""}</h3>
         <div class="statrow" role="group" aria-label="Mark this net">
           <button class="statbtn${rd.status === "good" ? " on good" : ""}" data-status="good" title="Mark this net known-good">Good</button>
@@ -596,7 +645,9 @@ export function renderInspector() {
         <label>DIODE (V)<input id="rDiode" data-f="diode" value="${esc(rd.diode || "")}" placeholder="–"></label>
         <label>VOLTAGE (V)<input id="rVolts" data-f="volts" value="${esc(rd.volts || "")}" placeholder="–"></label>
         <label>TO GND (Ω)<input id="rOhms" data-f="ohms" value="${esc(rd.ohms || "")}" placeholder="–"></label>
-        <input class="rnote" id="rNote" data-f="note" value="${esc(rd.note || "")}" placeholder="Note, e.g. gets warm, charger plugged in"></div></div>`;
+        <input class="rnote" id="rNote" data-f="note" value="${esc(rd.note || "")}" placeholder="Note, e.g. gets warm, charger plugged in"></div>
+        <div class="rdbar"><button class="btn" id="rdSave" data-act="saveReading">Save to database</button><span id="rdState" class="rdstate"></span></div>
+        <button class="linkbtn" data-act="openDb">Open readings database…</button></div>`;
     if (gnd) h += `<div class="notice">Ground is shared by most of the board, so subnet tracing and airwires are off for it.</div>`;
     else {
       h += `<div class="sec"><h3>Subnets<span class="seg" role="group" aria-label="Depth">${[1, 2, 3, 4].map((n) => `<button data-depth="${n}" aria-pressed="${S.depth === n}">${n}</button>`).join("")}</span></h3>
@@ -613,7 +664,7 @@ export function renderInspector() {
     if (!gnd && S.airwires) h += `<p class="foot">Lines on the board are airwires: the shortest pin-to-pin links within a net. Boardview files store pins and nets, not copper routing.</p>`;
   } else if (sel.type === "part") {
     const i = b ? b.partByName.get(sel.name.toUpperCase()) : undefined; const p = i !== undefined ? b.parts[i] : null;
-    h += `<div class="selh"><div class="kind">Part</div><h2>${esc(sel.name)}</h2>${p && p.desc ? `<div class="desc">${esc(p.desc)}</div>` : ""}<div class="meta">${p ? `${p.side === "B" ? "Bottom side" : p.side === "BOTH" ? "Through-hole / both sides" : "Top side"} · ${p.pins.length} pin${p.pins.length > 1 ? "s" : ""}` : "Not in boardview"}</div><div class="row"><button class="btn" data-act="ask">Ask assistant</button><button class="btn" data-act="clear">Clear</button></div></div>`;
+    h += `<div class="selh"><div class="kind">Part</div><h2>${esc(sel.name)}</h2>${p && p.desc ? `<div class="desc">${esc(p.desc)}</div>` : ""}<div class="meta">${p ? `${p.side === "B" ? "Bottom side" : p.side === "BOTH" ? "Through-hole / both sides" : "Top side"} · ${p.pins.length} pin${p.pins.length > 1 ? "s" : ""}` : "Not in boardview"}</div><div class="row"><button class="btn" data-act="ask">Ask Flux</button><button class="btn" data-act="clear">Clear</button></div></div>`;
     h += `<div class="sec"><h3>In schematic</h3>${hitsHTML(sel.name)}</div>`;
     if (p) {
       const rows = p.pins.slice(0, 800).map((pi) => { const q = b.pins[pi]; return `<tr><td>${esc(q.num)}</td><td>${q.net ? `<button class="${b.gnd.has(q.net) ? "g" : ""}" data-net="${esc(q.net)}" data-pin="${pi}">${esc(q.net)}</button>` : `<span class="g">no connection</span>`}</td></tr>`; }).join("");
@@ -624,10 +675,18 @@ export function renderInspector() {
       <div class="sec"><h3>In schematic</h3>${hitsHTML(sel.name)}</div>`;
   }
   el.innerHTML = h;
+  if (sel && sel.type === "net") updateReadingState();
 }
 $("#insp").addEventListener("click", (e) => {
   const sb = e.target.closest("[data-status]");
-  if (sb && S.sel && S.sel.type === "net") { const cur = (readingsCache[S.sel.name] || {}).status || ""; setReading(S.sel.name, "status", sb.dataset.status === cur ? "" : sb.dataset.status); renderInspector(); return; }
+  if (sb && S.sel && S.sel.type === "net") {
+    const d = draftFor(S.sel.name); d.status = sb.dataset.status === (d.status || "") ? "" : sb.dataset.status;
+    document.querySelectorAll("#insp .statbtn").forEach((x) => { const on = (x.dataset.status || "") === (d.status || ""); x.className = "statbtn" + (on ? " on" + (x.dataset.status ? " " + x.dataset.status : "") : ""); });
+    updateReadingState(); return;
+  }
+  const act0 = e.target.closest("[data-act]");
+  if (act0 && act0.dataset.act === "saveReading") { saveDraft(); return; }
+  if (act0 && act0.dataset.act === "openDb") { openDbDialog(); return; }
   const t = e.target.closest("[data-net],[data-part],[data-focus],[data-depth],[data-page],[data-act]"); if (!t) return;
   const act = t.dataset.act;
   if (act === "clear") { select(null); return; }
@@ -635,6 +694,7 @@ $("#insp").addEventListener("click", (e) => {
   if (act === "dismissGood") { goodNote = null; renderInspector(); return; }
   if (act === "settings") { openSettings(); return; }
   if (act === "ask") { app.assistant && app.assistant.askAboutSelection(); return; }
+  if (act === "probe") { app.assistant && app.assistant.guideCard(); return; }
   if (t.dataset.depth) { S.depth = +t.dataset.depth; refreshTree(); return; }
   if (t.dataset.page !== undefined) {
     const name = t.dataset.name, pg = +t.dataset.page; const hits = sortedHits(name);
@@ -647,7 +707,8 @@ $("#insp").addEventListener("click", (e) => {
   if (t.dataset.focus) { focusBoardOn("net", t.dataset.focus); focusSchOn(t.dataset.focus, 0); }
 });
 $("#insp").addEventListener("change", (e) => { if (e.target.id === "capsChk") { S.caps = e.target.checked; refreshTree(); } });
-$("#insp").addEventListener("input", (e) => { const f = e.target.dataset && e.target.dataset.f; if (f && S.sel && S.sel.type === "net") setReading(S.sel.name, f, e.target.value.trim()); });
+$("#insp").addEventListener("input", (e) => { const f = e.target.dataset && e.target.dataset.f; if (f && S.sel && S.sel.type === "net") { draftFor(S.sel.name)[f] = e.target.value; updateReadingState(); } });
+$("#insp").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.dataset && e.target.dataset.f) { e.preventDefault(); saveDraft(); } });
 
 /* ---------------- interaction ---------------- */
 function interact(canvas, apiH) {
@@ -740,14 +801,15 @@ $("#fitS").addEventListener("click", fitSch);
 $("#pPrev").addEventListener("click", () => gotoPage(sv.page - 1));
 $("#pNext").addEventListener("click", () => gotoPage(sv.page + 1));
 $("#pageSel").addEventListener("change", (e) => gotoPage(+e.target.value));
+// Flux floats over the board in a chat bubble, so the board and schematic keep the full width.
 function toggleAI(on) {
-  const w = $("#work"); on = on === undefined ? !w.classList.contains("ai") : on;
-  w.classList.toggle("ai", on); $("#aiPane").hidden = !on; $("#aiToggle").setAttribute("aria-pressed", on);
+  const pane = $("#aiPane"); on = on === undefined ? pane.hidden : on;
+  pane.hidden = !on; $("#aiBubble").hidden = on; if (on) $("#aiDot").hidden = true;
   try { localStorage.setItem("tl.ai", on ? "1" : "0"); } catch (e) {}
-  setTimeout(() => { reqB(); reqS(); }, 20);
-  if (on) setTimeout(() => $("#aiInput").focus(), 30);
+  if (on) setTimeout(() => { const i = $("#aiInput"); if (!document.activeElement || !document.activeElement.closest("#aiPane")) i.focus(); }, 30);
 }
-$("#aiToggle").addEventListener("click", () => toggleAI());
+$("#aiBubble").addEventListener("click", () => toggleAI(true));
+$("#guideBtn").addEventListener("click", () => app.assistant && app.assistant.guideCard());
 $("#tbOpenBoard").addEventListener("click", () => $("#fBoard").click());
 $("#tbOpenSch").addEventListener("click", () => $("#fSch").click());
 
@@ -760,8 +822,10 @@ function showMenu(name) {
   // reflect live state as checkmarks
   d.querySelectorAll("[data-cmd]").forEach((b) => b.removeAttribute("aria-checked"));
   const chk = (cmd, on) => { const b = d.querySelector(`[data-cmd="${cmd}"]`); if (b) b.setAttribute("aria-checked", on ? "true" : "false"); };
-  if (name === "view") { chk("view-split", S.layout === "split"); chk("view-board", S.layout === "board"); chk("view-sch", S.layout === "sch"); chk("side-top", S.side === "T"); chk("side-bottom", S.side === "B"); chk("airwires", S.airwires); const m = config.theme_mode || "system"; chk("theme-system", m === "system"); chk("theme-light", m === "light"); chk("theme-dark", m === "dark"); }
-  if (name === "assistant") chk("ai-toggle", $("#work").classList.contains("ai"));
+  if (name === "view") { chk("split-side", splitDir === "side"); chk("split-stack", splitDir === "stack"); chk("view-split", S.layout === "split"); chk("view-board", S.layout === "board"); chk("view-sch", S.layout === "sch"); chk("side-top", S.side === "T"); chk("side-bottom", S.side === "B"); chk("airwires", S.airwires); const m = config.theme_mode || "system"; chk("theme-system", m === "system"); chk("theme-light", m === "light"); chk("theme-dark", m === "dark"); }
+  if (name === "assistant") chk("ai-toggle", !$("#aiPane").hidden);
+  if (name === "file") fillRecentMenu();
+  if (name === "bench" && app.bench) { $("#benchMenu").innerHTML = app.bench.menuItems().map((i) => `<button role="menuitem" data-cmd="bench-show" data-id="${esc(i.id)}" aria-checked="${i.show}">${esc(i.name)}<span class="acc">${esc(i.status)}</span></button>`).join("") || `<div class="mlabel" style="text-transform:none;letter-spacing:0">No instruments yet</div>`; chk("bench-bar", app.bench.barOn); }
   d.style.left = Math.min(btn.offsetLeft, window.innerWidth - d.offsetWidth - 10) + "px";
   btn.setAttribute("aria-expanded", "true"); d.hidden = false; openMenu = name;
 }
@@ -772,10 +836,16 @@ const MENU_CMDS = {
   "open-board": () => $("#fBoard").click(), "open-sch": () => $("#fSch").click(),
   reload: () => location.reload(), exit: () => { if (hasBackend) api("/api/quit", { method: "POST" }).catch(() => {}); },
   "view-split": () => doLayout("split"), "view-board": () => doLayout("board"), "view-sch": () => doLayout("sch"),
+  "split-side": () => setSplitDir("side", true), "split-stack": () => setSplitDir("stack", true),
+  "open-db": () => openDbDialog(), tutorial: () => startTour(),
   "side-top": () => setSide("T"), "side-bottom": () => setSide("B"), fit: () => { fitBoard(); fitSch(); },
   airwires: () => { const a = $("#airw"); a.checked = !a.checked; a.dispatchEvent(new Event("change")); },
   "theme-system": () => saveTheme("system"), "theme-light": () => saveTheme("light"), "theme-dark": () => saveTheme("dark"),
   "ai-toggle": () => toggleAI(), "ai-new": () => $("#aiNew").click(), "ai-ask": () => app.assistant && app.assistant.askAboutSelection(),
+  guided: () => app.assistant && app.assistant.guideCard(), sample: () => loadSample(),
+  "bench-setup": () => app.bench && app.bench.openSetup(), "bench-demo": () => app.bench && app.bench.addDemo(), "bench-bar": () => app.bench && app.bench.toggleBar(),
+  "bench-show": (b) => app.bench && app.bench.toggleShow(b.dataset.id),
+  "recent-open": (b) => openRecent(b.dataset.id), "recent-clear": async () => { await api("/api/recent", { method: "DELETE" }).catch(() => {}); recentCache = { items: [], last: {} }; toast("Recent files cleared."); },
   "check-updates": async () => {
     if (!config.update_repo) { openSettings(); toast("Enter your GitHub repo under Settings → Updates first."); return; }
     toast("Checking GitHub for updates…"); const u = await checkUpdates(true);
@@ -792,7 +862,7 @@ function toast(msg) {
   el.textContent = msg; el.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove("show"), 4000);
 }
 function doLayout(l) { setLayout(l); setTimeout(() => { fitBoard(); fitSch(); }, 30); }
-document.querySelectorAll(".dropdown").forEach((d) => d.addEventListener("click", (e) => { const b = e.target.closest("[data-cmd]"); if (!b) return; closeMenus(); const fn = MENU_CMDS[b.dataset.cmd]; if (fn) fn(); }));
+document.querySelectorAll(".dropdown").forEach((d) => d.addEventListener("click", (e) => { const b = e.target.closest("[data-cmd]"); if (!b) return; closeMenus(); const fn = MENU_CMDS[b.dataset.cmd]; if (fn) fn(b); }));
 document.addEventListener("click", (e) => { if (openMenu && !e.target.closest(".menubar")) closeMenus(); });
 document.addEventListener("keydown", (e) => {
   if (e.target.closest("input,select,textarea")) { if (e.key === "Escape") closeMenus(); return; }
@@ -811,6 +881,7 @@ document.addEventListener("keydown", (e) => {
 const boardListeners = new Set();
 export function onBoardChange(fn) { boardListeners.add(fn); }
 function setBoard(b) {
+  if (!b.sample) hideWelcome();
   S.board = b; if (S.sch && S.sch.sample && !b.sample) { S.sch = null; resetSR(); updatePageSel(); $("#schName").textContent = ""; }
   $("#boardName").textContent = `${b.name} · ${b.format} · ${b.parts.length} parts · ${b.nets.size} nets`;
   S.side = "T"; document.querySelectorAll("#sideSeg button").forEach((x) => x.setAttribute("aria-pressed", x.dataset.s === "T"));
@@ -818,6 +889,7 @@ function setBoard(b) {
   boardListeners.forEach((f) => { try { f(b); } catch (e) {} });
 }
 function setSch(sch) {
+  if (!sch.sample) hideWelcome();
   S.sch = sch; resetSR(); sv.page = 0; if (S.board && S.board.sample && !sch.sample) { S.board = null; $("#boardName").textContent = ""; }
   $("#schName").textContent = `${sch.name} · ${sch.pages.length} pages`;
   lastErr = null;
@@ -825,18 +897,94 @@ function setSch(sch) {
   if (sch.noText) showError("This PDF has no text layer (it’s probably scanned), so names can’t be linked to the board. The assistant can still look at its pages as images.");
   boardListeners.forEach((f) => { try { f(S.board); } catch (e) {} });
 }
-export async function openBoardBytes(files) {
+export async function openBoardBytes(files, meta = {}) {
   const prog = $("#bprog"); prog.hidden = false; prog.textContent = "Reading " + files[0].name + "…";
+  const keep = meta.recentId || meta.startup ? files : files.map((f) => ({ name: f.name, blob: new Blob([f.bytes]) })); // copy before parsing can detach the buffers
   try {
     await new Promise((r) => setTimeout(r, 10));
     const m = await parseBoardFiles(files, { fz: "", xzz: config.xzz_key, cae: config.cae_key, fzBuiltin: builtinKeys.fz, caeBuiltin: builtinKeys.cae });
-    setBoard(finalizeBoard(m));
-  } catch (err) { console.error(err); showError(err.message || "Couldn’t read that boardview file.", err instanceof NeedKeyError ? err.kind : null); }
+    const b = finalizeBoard(m); setBoard(b);
+    remember("board", keep, `${b.format} · ${b.parts.length} parts · ${b.nets.size} nets`, meta);
+    return true;
+  } catch (err) { console.error(err); showError(err.message || "Couldn’t read that boardview file.", err instanceof NeedKeyError ? err.kind : null); return false; }
   finally { prog.hidden = true; }
 }
-export async function openSchBytes(bytes, name) {
-  try { setSch(await loadPdf(bytes, name)); }
-  catch (err) { console.error(err); $("#sprog").hidden = true; showError("Couldn’t open that PDF: " + (err.message || err)); }
+export async function openSchBytes(bytes, name, meta = {}) {
+  const keep = [{ name, blob: meta.recentId || meta.startup ? null : new Blob([bytes]) }]; // pdf.js transfers (empties) the buffer, so copy it first
+  try { const sch = await loadPdf(bytes, name); setSch(sch); remember("schematic", keep, `${sch.pages.length} pages`, meta); return true; }
+  catch (err) { console.error(err); $("#sprog").hidden = true; showError("Couldn’t open that PDF: " + (err.message || err)); return false; }
+}
+
+/* ---------------- recent files + reopen prompt ---------------- */
+// Opened files are copied to the app's data folder (the page never learns their paths), so they can be
+// reopened from File → Open recent and from the prompt shown when Trace Lab starts.
+let recentCache = { items: [], last: {} }; const curIds = { board: "", schematic: "" };
+async function loadRecent() { if (!hasBackend) return recentCache; try { const r = await api("/api/recent"); if (r.ok) { recentCache = await r.json(); recentCache.items = recentCache.items || []; } } catch (e) {} return recentCache; }
+function saveSession() { if (hasBackend) api(`/api/recent/session?board=${encodeURIComponent(curIds.board)}&schematic=${encodeURIComponent(curIds.schematic)}`, { method: "POST" }).catch(() => {}); }
+async function remember(kind, files, info, meta) {
+  if (!hasBackend) return;
+  try {
+    let r;
+    if (meta.recentId) r = await api("/api/recent/add?touch=" + encodeURIComponent(meta.recentId), { method: "POST" });
+    else {
+      const fd = new FormData(); fd.append("kind", kind); fd.append("info", info || "");
+      if (meta.startup) fd.append("startup", meta.startup.join(","));
+      else files.forEach((f) => fd.append("files", f.blob || new Blob([f.bytes]), f.name));
+      r = await api("/api/recent/add", { method: "POST", body: fd });
+    }
+    if (!r.ok) return; const e = await r.json(); curIds[kind] = e.id;
+    if (kind === "board" && (!S.sch || S.sch.sample)) curIds.schematic = "";
+    saveSession(); loadRecent();
+  } catch (e) { console.warn("recent", e); }
+}
+const ago = (t) => { const s = (Date.now() - t) / 1000; return s < 90 ? "just now" : s < 3600 ? Math.round(s / 60) + " min ago" : s < 86400 ? Math.round(s / 3600) + " h ago" : s < 86400 * 2 ? "yesterday" : new Date(t).toLocaleDateString(); };
+async function fetchRecentFiles(e) { return Promise.all(e.files.map(async (f, i) => { const r = await api(`/api/recent/file?id=${encodeURIComponent(e.id)}&i=${i}`); if (!r.ok) throw new Error(`${f.name} isn't available any more.`); return { name: f.name, bytes: new Uint8Array(await r.arrayBuffer()) }; })); }
+export async function openRecent(id) {
+  const e = recentCache.items.find((x) => x.id === id); if (!e) { toast("That file isn't in the recent list any more."); return false; }
+  try {
+    const files = await fetchRecentFiles(e);
+    return e.kind === "board" ? await openBoardBytes(files, { recentId: id }) : await openSchBytes(files[0].bytes, files[0].name, { recentId: id });
+  } catch (err) { toast(err.message); return false; }
+}
+async function reopenLast() {
+  const { board, schematic } = recentCache.last || {}; const btn = $("#wReopen"); if (btn) { btn.disabled = true; btn.textContent = "Opening…"; }
+  if (board) await openRecent(board);
+  if (schematic) await openRecent(schematic);
+  curIds.board = board || ""; curIds.schematic = schematic || ""; saveSession();
+}
+function fillRecentMenu() {
+  const el = $("#recentMenu"); const paint = () => {
+    el.innerHTML = recentCache.items.length ? recentCache.items.slice(0, 8).map((e) => `<button role="menuitem" class="recent" data-cmd="recent-open" data-id="${esc(e.id)}" title="${esc(e.files.map((f) => f.name).join(", "))}"><span class="k">${e.kind === "board" ? "BRD" : "PDF"}</span>${esc(e.files[0].name)}${e.files.length > 1 ? " +" + (e.files.length - 1) : ""}<span class="acc">${esc(ago(e.opened))}</span></button>`).join("") + `<button role="menuitem" data-cmd="recent-clear">Clear recent files</button>`
+      : `<div class="mlabel" style="text-transform:none;letter-spacing:0">Nothing opened yet</div>`;
+  };
+  paint(); loadRecent().then(() => { if (openMenu === "file") paint(); });
+}
+function hideWelcome() { const w = $("#welcome"); if (w) w.hidden = true; }
+async function showWelcome() {
+  await loadRecent(); const w = $("#welcome"); const rc = recentCache; const by = (id) => rc.items.find((e) => e.id === id);
+  const lb = by(rc.last && rc.last.board), ls = by(rc.last && rc.last.schematic);
+  const fileRow = (e) => `<div class="wfile"><span class="ic ${e.kind === "board" ? "" : "pdf"}">${e.kind === "board" ? "BRD" : "PDF"}</span><div class="t"><b title="${esc(e.files.map((f) => f.name).join(", "))}">${esc(e.files[0].name)}${e.files.length > 1 ? ` +${e.files.length - 1}` : ""}</b><span>${esc(e.info || "")}${e.info ? " · " : ""}opened ${esc(ago(e.opened))}</span></div></div>`;
+  const others = rc.items.filter((e) => e !== lb && e !== ls).slice(0, 6);
+  const recentList = others.length ? `<div class="dlg-sec">Recent files</div><div class="wrecent">${others.map((e) => `<button data-recent="${esc(e.id)}"><span class="k">${e.kind === "board" ? "BRD" : "PDF"}</span><span class="n">${esc(e.files[0].name)}</span><span class="d">${esc(ago(e.opened))}</span></button>`).join("")}</div>` : "";
+  const openRow = `<div class="row2"><button class="btn" data-w="board">Open boardview…</button><button class="btn" data-w="sch">Open schematic…</button><span class="spacer"></span><button class="linkbtn" data-w="sample" style="margin:0">Try the sample board</button></div>`;
+  w.innerHTML = lb || ls ? `<div class="wcard" role="dialog" aria-labelledby="wH"><h2 id="wH">Pick up where you left off?</h2><p>Reopen the files you had open last time.</p>
+      <div class="wfiles">${lb ? fileRow(lb) : ""}${ls ? fileRow(ls) : ""}</div>
+      <div class="row2"><button class="btn primary" id="wReopen" data-w="reopen">Reopen ${lb && ls ? "both" : "it"}</button><button class="btn" data-w="empty">Start empty</button></div>${recentList}<div class="dlg-sec"></div>${openRow}</div>`
+    : `<div class="wcard" role="dialog" aria-labelledby="wH"><h2 id="wH">Open a board to get started</h2><p>Open a boardview and its schematic PDF, or drop them anywhere on the window. Trace Lab reads ${FORMATS.length}+ boardview formats.</p>${recentList}${openRow}</div>`;
+  w.hidden = false; const rb = $("#wReopen"); if (rb) setTimeout(() => rb.focus(), 50);
+}
+$("#welcome").addEventListener("click", async (e) => {
+  const r = e.target.closest("[data-recent]"); if (r) { await openRecent(r.dataset.recent); return; }
+  const b = e.target.closest("[data-w]"); if (!b) return; const a = b.dataset.w;
+  if (a === "reopen") reopenLast(); else if (a === "empty") hideWelcome(); else if (a === "board") $("#fBoard").click(); else if (a === "sch") $("#fSch").click(); else if (a === "sample") { hideWelcome(); loadSample(); }
+});
+async function loadSample() {
+  S.board = buildSample(); S.sch = buildSampleSchematic(S.board); resetSR(); sv.page = 0;
+  $("#boardName").textContent = `${S.board.name} · ${S.board.parts.length} parts · ${S.board.nets.size} nets`;
+  $("#schName").textContent = `${S.sch.name} · ${S.sch.pages.length} pages`;
+  await new Promise((r) => requestAnimationFrame(r));
+  fitBoard(); fitSch(); updatePageSel(); loadReadings(); select({ type: "net", name: "PP3V3_S5" }, { focusBoard: false });
+  boardListeners.forEach((f) => { try { f(S.board); } catch (e) {} });
 }
 async function filesToBytes(list) { return Promise.all([...list].map(async (f) => ({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) }))); }
 async function routeFiles(list) {
@@ -857,10 +1005,10 @@ async function openStartupFiles() {
   try {
     const r = await api("/api/startup"); if (!r.ok) return false; const s = await r.json(); if (!s.files || !s.files.length) return false;
     const fetchF = async (f) => ({ name: f.name, bytes: new Uint8Array(await (await api("/api/file?id=" + f.id)).arrayBuffer()) });
-    const boards = await Promise.all(s.files.filter((f) => f.kind === "board").map(fetchF));
+    const bfs = s.files.filter((f) => f.kind === "board"); const boards = await Promise.all(bfs.map(fetchF));
     const pdf = s.files.find((f) => f.kind === "schematic");
-    if (boards.length) await openBoardBytes(boards);
-    if (pdf) { const f = await fetchF(pdf); await openSchBytes(f.bytes, f.name); }
+    if (boards.length) await openBoardBytes(boards, { startup: bfs.map((f) => f.id) });
+    if (pdf) { const f = await fetchF(pdf); await openSchBytes(f.bytes, f.name, { startup: [pdf.id] }); }
     return boards.length > 0 || !!pdf;
   } catch (e) { console.warn(e); return false; }
 }
@@ -873,7 +1021,7 @@ export const PROVIDERS = {
   openai: { label: "OpenAI", key: "sk-…", host: "api.openai.com", getKey: "platform.openai.com/api-keys", vision: true,
     models: ["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o", "o4-mini"], def: "gpt-4.1" },
   gemini: { label: "Google Gemini", key: "AIza…", host: "generativelanguage.googleapis.com", getKey: "aistudio.google.com/apikey", vision: true,
-    models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"], def: "gemini-2.5-flash" },
+    models: ["gemini-3.8-flash"], def: "gemini-3.8-flash" },
   openrouter: { label: "OpenRouter", key: "sk-or-…", host: "openrouter.ai", getKey: "openrouter.ai/keys", vision: true,
     models: ["anthropic/claude-sonnet-4.5", "openai/gpt-4.1", "google/gemini-2.5-pro", "meta-llama/llama-3.3-70b-instruct"], def: "anthropic/claude-sonnet-4.5" },
   custom: { label: "your AI service", key: "API key (leave blank if the server needs none)", host: "your endpoint", getKey: "", vision: false,
@@ -887,6 +1035,44 @@ function keyStatus() {
   st($("#sCaeSt"), cae.length ? cae.length === 44 : null, cae.length ? (cae.length === 44 ? "44 words" : cae.length + " of 44 words") : "");
   st($("#sXzzSt"), x ? checkXZZKey(parseHexKey64(x)) : null, x ? (checkXZZKey(parseHexKey64(x)) ? "Key looks valid" : "Key must be 16 hex digits and pass the parity check") : "");
 }
+// ---- model picker: a real dropdown, grouped and labelled free / paid ----
+let modelMeta = new Map(); // id -> {free:true|false|null, label, vision:true|false|null}
+const isLocalUrl = (u) => /^(https?:\/\/)?(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1)/i.test(u || "");
+const per1M = (v) => { const n = parseFloat(v) * 1e6; return n >= 10 ? n.toFixed(0) : n >= 1 ? n.toFixed(2).replace(/\.?0+$/, "") : n.toFixed(3).replace(/\.?0+$/, ""); };
+function modelInfo(provider, id, raw) {
+  if (provider === "openrouter" && raw && raw.pricing) {
+    const pin = parseFloat(raw.pricing.prompt) || 0, pout = parseFloat(raw.pricing.completion) || 0;
+    const mods = raw.architecture && raw.architecture.input_modalities; const vision = Array.isArray(mods) ? mods.includes("image") : null;
+    return pin === 0 && pout === 0 ? { free: true, label: "Free", vision } : { free: false, label: `$${per1M(raw.pricing.prompt)} in / $${per1M(raw.pricing.completion)} out per 1M tokens`, vision };
+  }
+  if (provider === "openrouter") return /:free$/.test(id) ? { free: true, label: "Free", vision: null } : { free: false, label: "Paid", vision: null };
+  if (provider === "gemini") return /flash/i.test(id) && !/image|omni/i.test(id) ? { free: true, label: "Free tier (daily limits; Google may use free-tier data)", vision: true } : { free: false, label: "Paid only", vision: true };
+  if (provider === "custom") return isLocalUrl($("#sBase").value || config.base_url) ? { free: true, label: "Free · runs on your own PC", vision: null } : { free: null, label: "Pricing set by the service", vision: null };
+  return { free: false, label: provider === "openai" ? "Paid · billed per use to your OpenAI credit" : "Paid · billed per use", vision: true };
+}
+function fillModelSelect(provider, ids, rawById, wanted) {
+  modelMeta = new Map(); const groups = { free: [], paid: [], other: [] };
+  for (const id of ids) { const m = modelInfo(provider, id, rawById && rawById.get(id)); modelMeta.set(id, m); (m.free === true ? groups.free : m.free === false ? groups.paid : groups.other).push(id); }
+  const opt = (id) => { const m = modelMeta.get(id); return `<option value="${esc(id)}">${esc(id)}  —  ${esc(m.label)}${m.vision === false ? " · can't read images" : ""}</option>`; };
+  const grp = (name, list) => (list.length ? `<optgroup label="${name}">${list.map(opt).join("")}</optgroup>` : "");
+  $("#sModelSel").innerHTML = grp("Free", groups.free) + grp("Paid", groups.paid) + grp("Other", groups.other) + `<option value="__custom__">Type a model name…</option>`;
+  setModel(wanted);
+}
+function setModel(id) {
+  const sel = $("#sModelSel"), inp = $("#sModel");
+  if (id && [...sel.options].some((o) => o.value === id)) { sel.value = id; inp.hidden = true; inp.value = id; }
+  else if (id) { sel.value = "__custom__"; inp.hidden = false; inp.value = id; }
+  else { const first = [...sel.options].find((o) => o.value !== "__custom__"); if (first) { sel.value = first.value; inp.value = first.value; inp.hidden = true; } else { sel.value = "__custom__"; inp.hidden = false; } }
+  showModelHint();
+}
+function showModelHint() {
+  const p = $("#sProvider").value, id = $("#sModel").value.trim(), m = modelMeta.get(id) || modelInfo(p, id, null);
+  const cost = m.free === true ? "This model is free to use" + (p === "gemini" ? " within Google's free-tier limits." : ".") : m.free === false ? `Paid: ${m.label}.` : "";
+  const img = m.vision === false ? " It can't read images, so the assistant won't be able to look at schematic pages." : " The assistant sends schematic and board images, so pick a model that can read images.";
+  $("#sModelHint").textContent = (cost + img).trim();
+}
+$("#sModelSel").addEventListener("change", () => { const v = $("#sModelSel").value; if (v === "__custom__") { $("#sModel").hidden = false; $("#sModel").value = ""; $("#sModel").focus(); } else { $("#sModel").hidden = true; $("#sModel").value = v; } showModelHint(); });
+$("#sModel").addEventListener("input", showModelHint);
 function syncProvider(initial) {
   const p = $("#sProvider").value, info = PROVIDERS[p] || PROVIDERS.anthropic;
   const hasKey = !!(config.keyProviders && config.keyProviders[p]);
@@ -896,11 +1082,22 @@ function syncProvider(initial) {
     ? `Stored on this PC in your user profile; sent only to ${esc(info.host)}.` + (info.getKey ? ` Get a key at <button class="btn" type="button" data-open="https://${esc(info.getKey)}" style="height:auto;padding:1px 6px">${esc(info.getKey)}</button>` : "")
     : "The assistant needs the Trace Lab desktop app.";
   $("#sBaseWrap").hidden = p !== "custom";
-  $("#sModels").innerHTML = info.models.map((m) => `<option value="${esc(m)}"></option>`).join("");
-  $("#sModelHint").textContent = info.vision ? "The assistant sends schematic and board images, so pick a model that can read images." : "For schematic/board images, the model must support vision (many local models don't).";
-  if (initial) $("#sModel").value = config.model || lsModel(p) || info.def;
-  else $("#sModel").value = lsModel(p) || info.def;
+  const want = initial && p === config.provider ? config.model || lsModel(p) || info.def : lsModel(p) || info.def;
+  const ids = info.models.slice(); if (want && !ids.includes(want)) ids.unshift(want);
+  fillModelSelect(p, ids, null, want);
 }
+function syncDbSettings() {
+  const r = config.readings || {}; const mode = r.mode || "local";
+  const od = $("#sDbMode").querySelector('option[value="onedrive"]');
+  od.disabled = !r.onedrive; od.textContent = r.onedrive ? "OneDrive (backed up and synced to your other PCs)" : "OneDrive (not set up on this PC)";
+  $("#sDbMode").value = mode; $("#sDbDir").value = config.readings_dir || ""; $("#sDbDirWrap").hidden = mode !== "custom";
+  $("#sDbPath").textContent = "Currently stored at: " + (r.path || "this PC") + (mode === "onedrive" ? " (synced by OneDrive)" : mode === "custom" ? " (synced by that folder's service, if any)" : "");
+}
+$("#sDbMode").addEventListener("change", () => { $("#sDbDirWrap").hidden = $("#sDbMode").value !== "custom"; const r = config.readings || {}; if ($("#sDbMode").value === "onedrive" && r.onedrive) $("#sDbPath").textContent = "Will be stored at: " + r.onedrive + "\\Trace Lab\\readings.json (synced by OneDrive). Existing readings move with it."; });
+$("#sDbOpen").addEventListener("click", () => { dlg.close("cancel"); openDbDialog(); });
+$("#sDbReveal").addEventListener("click", () => { if (hasBackend) api("/api/readings/reveal").catch(() => {}); });
+$("#sSplitSeg").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setSplitDir(b.dataset.dir, true); });
+$("#sTutorial").addEventListener("click", () => { dlg.close("cancel"); setTimeout(startTour, 120); });
 export function openSettings() {
   $("#sProvider").value = PROVIDERS[config.provider] ? config.provider : "anthropic";
   $("#sKey").value = ""; $("#sBase").value = config.base_url || "";
@@ -909,13 +1106,53 @@ export function openSettings() {
   const mode = config.theme_mode || "system", accent = config.accent || "copper";
   document.querySelectorAll("#sThemeSeg button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.mode === mode));
   document.querySelectorAll("#sAccent .sw").forEach((b) => b.setAttribute("aria-pressed", b.dataset.accent === accent));
+  document.querySelectorAll("#sSplitSeg button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.dir === splitDir));
+  syncDbSettings();
   $("#sRepo").value = config.update_repo || ""; $("#sGh").value = ""; $("#sGh").placeholder = config.hasGitHubToken ? "Token saved. Type a new one to replace it." : "github_pat_…";
   $("#sAuto").checked = config.auto_update !== false; $("#sUpdSt").textContent = ""; $("#sUpdSt").className = "st";
   $("#sVer").textContent = "Trace Lab " + (config.version || "");
+  $("#sModelSt").textContent = "";
   keyStatus(); dlg.showModal();
+  if (config.keyProviders && config.keyProviders[$("#sProvider").value]) loadModels(true); // refresh the model list quietly
 }
 ["#sXzz", "#sCae"].forEach((s) => $(s).addEventListener("input", keyStatus));
-$("#sProvider").addEventListener("change", () => syncProvider(false));
+$("#sProvider").addEventListener("change", () => { syncProvider(false); $("#sModelSt").textContent = ""; if (config.keyProviders && config.keyProviders[$("#sProvider").value]) loadModels(true); });
+$("#sBase").addEventListener("change", showModelHint);
+// Ask the chosen service which models this key can use. Saves the typed key/URL first so the backend can call it.
+async function loadModels(quiet) {
+  const st = $("#sModelSt"); const say = (t, ok) => { st.textContent = t; st.className = "st " + (ok === undefined ? "" : ok ? "ok" : "bad"); };
+  if (!hasBackend) return;
+  const provider = $("#sProvider").value, key = $("#sKey").value.trim(), base = $("#sBase").value.trim();
+  if (key || base !== (config.base_url || "")) {
+    const body = { provider, base_url: base }; if (key) body.api_key = key;
+    try { const r = await api("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); if (r.ok) Object.assign(config, await r.json()); } catch (e) {}
+    if (key) { $("#sKey").value = ""; $("#sKey").placeholder = "Key saved. Type a new one to replace it."; }
+  }
+  if (!quiet) say("Asking " + (PROVIDERS[provider] || {}).label + "…");
+  try {
+    const r = await api("/api/models?provider=" + encodeURIComponent(provider)); let j = null; try { j = JSON.parse(await r.text()); } catch (e) {}
+    if (Array.isArray(j)) j = j[0];
+    if ($("#sProvider").value !== provider) return; // user switched while we waited
+    if (!r.ok) { const em = j && ((j.error && j.error.message) || j.message); if (!quiet) say((r.status === 401 || r.status === 403 ? "The key was rejected." : "Couldn't list models.") + (em ? " " + String(em).slice(0, 160) : ""), false); return; }
+    const raw = (j && (j.data || j.models)) || []; const byId = new Map();
+    for (const m of raw) { const id = String(m.id || m.name || "").replace(/^models\//, ""); if (id) byId.set(id, m); }
+    // keep chat models; drop embeddings, speech, image-generation and moderation models
+    let ids = [...byId.keys()].filter((id) => !/embed|whisper|tts|dall-e|image|moderation|audio|realtime|transcri|search|veo|imagen|aqa|live|translate|banana|omni/i.test(id));
+    if (!ids.length) { if (!quiet) say("The service returned no chat models.", false); return; }
+    ids.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    if ($("#sModelSel").value === "__custom__") { // user is typing their own name: refresh the list but leave their choice alone
+      const typed = $("#sModel").value; fillModelSelect(provider, ids, byId, null);
+      $("#sModelSel").value = "__custom__"; $("#sModel").hidden = false; $("#sModel").value = typed; showModelHint();
+      if (!quiet) say(`${ids.length} models available.`, true); return;
+    }
+    const cur = $("#sModel").value.trim();
+    const pick = ids.includes(cur) ? cur : ids.find((m) => /flash|sonnet|mini|4\.1|gpt-5/i.test(m) && modelInfo(provider, m, byId.get(m)).free !== false) || ids.find((m) => /flash|sonnet|mini|4\.1|gpt-5/i.test(m)) || ids[0];
+    fillModelSelect(provider, ids, byId, pick);
+    const nFree = ids.filter((id) => modelMeta.get(id).free === true).length;
+    say(`${ids.length} models available${nFree ? `, ${nFree} free` : ""}.` + (cur && cur !== pick ? ` "${cur}" isn't one of them, so "${pick}" is selected — click Save to keep it.` : ""), true);
+  } catch (e) { if (!quiet) say("Couldn't list models: " + e.message, false); }
+}
+$("#sLoadModels").addEventListener("click", () => loadModels(false));
 $("#settingsBtn").addEventListener("click", openSettings);
 // live theme preview while the dialog is open
 $("#sThemeSeg").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; document.querySelectorAll("#sThemeSeg button").forEach((x) => x.setAttribute("aria-pressed", x === b)); applyAppearance(b.dataset.mode, currentAccent()); });
@@ -928,16 +1165,133 @@ dlg.addEventListener("close", async () => {
   const provider = $("#sProvider").value, model = $("#sModel").value.trim();
   setLsModel(provider, model);
   const body = { provider, model, base_url: $("#sBase").value.trim(), xzz_key: $("#sXzz").value.trim(), cae_key: $("#sCae").value.trim(),
-    theme_mode: currentMode(), accent: currentAccent() };
+    theme_mode: currentMode(), accent: currentAccent(), readings_mode: $("#sDbMode").value, readings_dir: $("#sDbDir").value.trim() };
   const k = $("#sKey").value.trim(); if (k) body.api_key = k;
   body.update_repo = $("#sRepo").value.trim(); body.auto_update = $("#sAuto").checked;
   const gh = $("#sGh").value.trim(); if (gh) body.github_token = gh;
+  const prevPath = (config.readings || {}).path;
   Object.assign(config, { provider, model, base_url: body.base_url, xzz_key: body.xzz_key, cae_key: body.cae_key, theme_mode: body.theme_mode, accent: body.accent });
   applyAppearance(config.theme_mode, config.accent);
-  if (hasBackend) { try { const r = await api("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); if (r.ok) Object.assign(config, await r.json()); } catch (e) { showError("Couldn’t save settings: " + e.message); } }
+  if (hasBackend) {
+    try {
+      const r = await api("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); const j = await r.json().catch(() => ({}));
+      if (r.ok) { Object.assign(config, j); const np = (config.readings || {}).path; if (np && np !== prevPath) { toast("Readings database moved to " + np); loadReadings(); } else toast("Settings saved."); }
+      else { toast("Settings not saved: " + ((j.error && j.error.message) || "HTTP " + r.status)); showError((j.error && j.error.message) || "Settings weren't saved."); }
+    } catch (e) { showError("Couldn’t save settings: " + e.message); }
+  }
   app.assistant && app.assistant.refresh();
   if (body.update_repo && config.auto_update !== false) checkUpdates(false);
 });
+
+/* ---------------- readings database browser ---------------- */
+const dbDlg = $("#dbDlg"); let dbAll = [], dbConfirm = null;
+export async function openDbDialog() {
+  if (!hasBackend) { toast("The readings database needs the Trace Lab desktop app."); return; }
+  $("#dbRows").innerHTML = `<tr><td colspan="9" class="foot">Loading…</td></tr>`; if (!dbDlg.open) dbDlg.showModal();
+  try {
+    const r = await api("/api/readings/all"); const j = await r.json(); if (!r.ok) throw new Error((j.error && j.error.message) || "HTTP " + r.status);
+    dbAll = j.readings || []; const st = j.storage || {};
+    $("#dbWhere").textContent = `Stored at ${st.path}` + (st.mode === "onedrive" ? " · synced by OneDrive" : st.mode === "custom" ? " · in your chosen folder" : " · this PC only (Settings → Readings database to move it to OneDrive)");
+    $("#dbCount").textContent = `${dbAll.length} reading${dbAll.length === 1 ? "" : "s"} · ${j.boards} board${j.boards === 1 ? "" : "s"}`;
+    renderDb();
+  } catch (e) { $("#dbRows").innerHTML = `<tr><td colspan="9" class="err-msg">Couldn't open the database: ${esc(e.message)}</td></tr>`; }
+}
+function renderDb() {
+  const f = $("#dbFilter").value.trim().toUpperCase(), stf = $("#dbStatus").value, cur = S.board && S.board.name;
+  const rows = dbAll.filter((r) => (!stf || r.status === stf) && (!f || (r.board + " " + r.net + " " + (r.note || "")).toUpperCase().includes(f)));
+  $("#dbRows").innerHTML = rows.length ? rows.map((r, i) => {
+    const key = r.board + "\u0000" + r.net; const here = r.board === cur;
+    return `<tr class="${here ? "cur" : ""}"><td>${esc(r.board)}</td><td class="m">${here ? `<button class="net" data-go="${esc(r.net)}" title="Show on the open board">${esc(r.net)}</button>` : esc(r.net)}</td>
+      <td>${r.status === "good" ? '<span class="tag good">good</span>' : r.status === "bad" ? '<span class="tag bad">fault</span>' : ""}</td>
+      <td class="m">${esc(r.diode || "")}</td><td class="m">${esc(r.volts || "")}</td><td class="m">${esc(r.ohms || "")}</td><td>${esc(r.note || "")}</td><td>${esc(fmtTime(r.updated))}</td>
+      <td>${dbConfirm === key ? `<button class="btn" data-del="${i}" style="height:24px;color:var(--bad)">Delete?</button>` : `<button class="x" data-ask="${i}" title="Delete this reading">✕</button>`}</td></tr>`;
+  }).join("") : `<tr><td colspan="9" class="foot">${dbAll.length ? "No readings match." : "No readings saved yet. Select a net, enter readings, and press Save to database."}</td></tr>`;
+  $("#dbRows").dataset.rows = JSON.stringify(rows.map((r) => [r.board, r.net]));
+}
+$("#dbFilter").addEventListener("input", renderDb); $("#dbStatus").addEventListener("change", renderDb);
+$("#dbRows").addEventListener("click", async (e) => {
+  const rows = JSON.parse($("#dbRows").dataset.rows || "[]");
+  const ask = e.target.closest("[data-ask]"), del = e.target.closest("[data-del]"), go = e.target.closest("[data-go]");
+  if (ask) { const [b, n] = rows[+ask.dataset.ask]; dbConfirm = b + "\u0000" + n; renderDb(); return; }
+  if (del) {
+    const [b, n] = rows[+del.dataset.del]; dbConfirm = null;
+    const r = await api("/api/readings?board=" + encodeURIComponent(b) + "&net=" + encodeURIComponent(n), { method: "DELETE" });
+    if (r.ok) { dbAll = dbAll.filter((x) => !(x.board === b && x.net === n)); if (S.board && b === S.board.name) { delete readingsCache[n]; if (draftNet === n) draft = {}; renderInspector(); } toast(`Deleted the reading for ${n} (${b}).`); $("#dbCount").textContent = `${dbAll.length} readings`; }
+    else toast("Couldn't delete that reading."); renderDb(); return;
+  }
+  if (go) { dbDlg.close(); selectByName(go.dataset.go); }
+});
+$("#dbExport").addEventListener("click", async () => { const r = await api("/api/readings/export", { method: "POST" }); const j = await r.json().catch(() => ({})); toast(r.ok ? "Exported to " + j.path : "Export failed: " + ((j.error && j.error.message) || r.status)); });
+$("#dbReveal").addEventListener("click", () => api("/api/readings/reveal").catch(() => {}));
+$("#dbClose").addEventListener("click", () => dbDlg.close());
+
+/* ---------------- split direction ---------------- */
+let splitDir = "side";
+function setSplitDir(dir, save) {
+  splitDir = dir === "stack" ? "stack" : "side"; $("#work").dataset.split = splitDir;
+  const ln = $("#splitDirLine"); if (ln) ln.setAttribute("d", splitDir === "stack" ? "M1.5 8h13" : "M8 2.5v11");
+  $("#splitDirBtn").title = splitDir === "stack" ? "Split is stacked (top / bottom). Click for side by side." : "Split is side by side. Click to stack top / bottom.";
+  document.querySelectorAll("#sSplitSeg button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.dir === splitDir));
+  if (S.layout !== "split") setLayout("split");
+  setTimeout(() => { reqB(); reqS(); fitBoard(); fitSch(); }, 40);
+  if (save) { config.split_dir = splitDir; if (hasBackend) api("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ split_dir: splitDir }) }).catch(() => {}); }
+}
+$("#splitDirBtn").addEventListener("click", () => setSplitDir(splitDir === "stack" ? "side" : "stack", true));
+
+/* ---------------- first-run tutorial ---------------- */
+const TOUR = [
+  { t: null, h: "Welcome to Trace Lab", p: "A one-minute tour of the main parts. You can replay it any time from Help → Tutorial or Settings → Help." },
+  { t: ".menus", h: "Menu bar", p: "File opens boardviews, schematic PDFs and your readings database. View changes the layout, board side and theme. Help has updates and this tutorial." },
+  { t: "#tbOpenBoard", h: "Open your files", p: "Open a boardview here, then its schematic PDF with the button beside it. You can also drag files onto the window. File → Open recent, and the prompt at start-up, reopen what you had open last time." },
+  { t: ".search", h: "Find anything", p: "Type a net, a part or any word from the schematic. Press / to jump here from anywhere." },
+  { t: "#boardPane", h: "Board view", p: "Click a pin to select its net, or a part's body to select the part. Scroll to zoom, drag to pan, and press B to flip to the bottom side." },
+  { t: "#schPane", h: "Schematic", p: "Click a net name or designator in the PDF to find it on the board. Every match is highlighted in the same colour on both sides." },
+  { t: "#insp", h: "Net details and readings", p: "See subnets, the parts on a net and where it appears in the schematic. Mark a net Good or Fault, enter diode, voltage and resistance readings, then press Save to database. A green ✓ confirms the save." },
+  { t: "#layoutSeg", h: "Layout", p: "Show the board, the schematic, or both. The button just to the right switches the split between side by side and stacked top/bottom." },
+  { t: "#aiBubble", alt: "#aiPane", h: "Flux, your repair assistant", p: "Click the bubble (or press A) to chat. Flux reads this board and its schematic, your saved readings including known-good values from other boards, and any instruments you connect." },
+  { t: "#guideBtn", h: "Guided diagnosis", p: "Flux asks you to probe one point at a time, highlights it on the board, reads your meter live and captures the value when it's steady, then works out the fault from the readings." },
+  { t: "#benchBar", h: "Bench instruments", p: "Connect a multimeter, bench power supply or oscilloscope over USB or the network. Click an instrument here to show or hide its live readout. Try Bench → Add demo instruments without any hardware." },
+  { t: "#settingsBtn", h: "Settings", p: "Pick your AI service and model (free and paid models are labelled), colours, the split direction, and where your readings database lives. Store it in OneDrive to back it up and share it between PCs." },
+];
+let tourI = -1, tourEls = null;
+export function startTour() {
+  closeMenus(); if (dlg.open) dlg.close("cancel");
+  if (!tourEls) {
+    const block = document.createElement("div"); block.className = "tour-block";
+    const hole = document.createElement("div"); hole.className = "tour-hole";
+    const card = document.createElement("div"); card.className = "tour-card"; card.setAttribute("role", "dialog"); card.setAttribute("aria-live", "polite");
+    card.innerHTML = `<h3 id="tourH"></h3><p id="tourP"></p><div class="row2"><span class="step" id="tourStep"></span><button class="btn" id="tourSkip">Skip</button><button class="btn" id="tourBack">Back</button><button class="btn primary" id="tourNext">Next</button></div>`;
+    document.body.append(block, hole, card); tourEls = { block, hole, card };
+    card.querySelector("#tourNext").onclick = () => tourGo(tourI + 1); card.querySelector("#tourBack").onclick = () => tourGo(tourI - 1); card.querySelector("#tourSkip").onclick = endTour;
+    window.addEventListener("resize", () => tourI >= 0 && tourGo(tourI));
+    document.addEventListener("keydown", (e) => { if (tourI < 0) return; if (e.key === "Escape") endTour(); else if (e.key === "ArrowRight" || e.key === "Enter") { e.preventDefault(); tourGo(tourI + 1); } else if (e.key === "ArrowLeft") tourGo(tourI - 1); }, true);
+  }
+  tourEls.block.hidden = tourEls.hole.hidden = tourEls.card.hidden = false; tourGo(0);
+}
+function tourGo(i) {
+  if (i >= TOUR.length) { endTour(); return; } tourI = Math.max(0, i);
+  const st = TOUR[tourI], { hole, card } = tourEls;
+  card.querySelector("#tourH").textContent = st.h; card.querySelector("#tourP").textContent = st.p;
+  card.querySelector("#tourStep").textContent = `${tourI + 1} of ${TOUR.length}`; card.querySelector("#tourBack").disabled = tourI === 0;
+  card.querySelector("#tourNext").textContent = tourI === TOUR.length - 1 ? "Finish" : "Next";
+  let el = st.t && document.querySelector(st.t); if (el && !el.offsetWidth && st.alt) el = document.querySelector(st.alt);
+  const W = window.innerWidth, H = window.innerHeight, cw = card.offsetWidth || 380, ch = card.offsetHeight || 180;
+  if (!el || !el.offsetWidth) { hole.style.cssText = `left:${W / 2}px;top:${H / 2}px;width:0;height:0`; card.style.left = (W - cw) / 2 + "px"; card.style.top = (H - ch) / 2 + "px"; return; }
+  const r = el.getBoundingClientRect(), pad = 6;
+  hole.style.cssText = `left:${r.left - pad}px;top:${r.top - pad}px;width:${r.width + pad * 2}px;height:${r.height + pad * 2}px`;
+  let x, y;
+  if (r.bottom + 14 + ch < H) { y = r.bottom + 14; x = r.left; }
+  else if (r.top - 14 - ch > 0) { y = r.top - 14 - ch; x = r.left; }
+  else if (r.right + 14 + cw < W) { x = r.right + 14; y = r.top + 20; }
+  else { x = r.left - 14 - cw; y = r.top + 20; }
+  card.style.left = Math.max(10, Math.min(W - cw - 10, x)) + "px"; card.style.top = Math.max(10, Math.min(H - ch - 10, y)) + "px";
+}
+function endTour() {
+  tourI = -1; if (tourEls) tourEls.block.hidden = tourEls.hole.hidden = tourEls.card.hidden = true;
+  config.tutorial_done = true;
+  if (hasBackend) api("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tutorial_done: true }) }).catch(() => {});
+  else { try { localStorage.setItem("tl.tour", "1"); } catch (e) {} }
+}
 
 /* ---------------- updates (GitHub releases) ---------------- */
 let updInfo = null;
@@ -987,6 +1341,7 @@ $("#sCheck").addEventListener("click", async () => {
 export const app = {
   S, sv, config, api, hasBackend, select, selectByName, searchAll, expand, isSeries, sortedHits, getReadings, renderRegion,
   focusBoardOn, focusSchOn, gotoPage, setLayout, setSide, openSettings, reqB, reqS, onSelect, onBoardChange, esc, PROVIDERS, applyAppearance,
+  startTour, openDbDialog, setSplitDir, get splitDir() { return splitDir; }, saveReadingFor, toast, toggleAI, openRecent, bench: null,
   captureBoard(maxW = 1400) {
     drawBoard(); const W = bc.width, H = bc.height; const s = Math.min(1, maxW / W); const c = document.createElement("canvas");
     c.width = Math.round(W * s); c.height = Math.round(H * s); c.getContext("2d").drawImage(bc, 0, 0, c.width, c.height); return c;
@@ -1005,24 +1360,22 @@ export function applyAppearance(mode, accent) {
   if (mode === "light" || mode === "dark") el.setAttribute("data-theme", mode); else el.removeAttribute("data-theme");
   el.setAttribute("data-accent", accent || "copper");
 }
-let aiPref = "1"; try { aiPref = localStorage.getItem("tl.ai") || "1"; } catch (e) {}
+let aiPref = "0"; try { aiPref = localStorage.getItem("tl.ai") || "0"; } catch (e) {}
 toggleAI(aiPref === "1");
 [bwrap, swrap].forEach((w) => new ResizeObserver(() => { reqB(); reqS(); }).observe(w));
 (async () => {
   await loadConfig();
   applyAppearance(config.theme_mode, config.accent);
+  setSplitDir(config.split_dir || "side", false);
   await loadBuiltinKeys();
   if (config.just_updated) goodNote = `Trace Lab was updated to ${config.version}.`;
   if (config.update_repo && config.auto_update !== false) setTimeout(() => checkUpdates(false), 2500);
+  if (hasBackend) app.bench = initBench(app); else $("#benchBar").hidden = true;
   app.assistant = initAssistant(app);
   const opened = await openStartupFiles();
-  if (!opened) {
-    S.board = buildSample(); S.sch = buildSampleSchematic(S.board);
-    $("#boardName").textContent = `${S.board.name} · ${S.board.parts.length} parts · ${S.board.nets.size} nets`;
-    $("#schName").textContent = `${S.sch.name} · ${S.sch.pages.length} pages`;
-    await new Promise((r) => requestAnimationFrame(r));
-    fitBoard(); fitSch(); loadReadings(); select({ type: "net", name: "PP3V3_S5" }, { focusBoard: false });
-    boardListeners.forEach((f) => { try { f(S.board); } catch (e) {} });
-  }
+  // Open empty, and offer to reopen the last files (or start with the sample when there's no backend).
+  if (!opened) { if (hasBackend) await showWelcome(); else await loadSample(); }
   renderInspector(); updatePageSel();
+  let seen = config.tutorial_done; if (!hasBackend) { try { seen = localStorage.getItem("tl.tour") === "1"; } catch (e) {} }
+  if (!seen) setTimeout(startTour, 700);
 })();

@@ -130,6 +130,45 @@ func registerAIProxy(mux *http.ServeMux) {
 	})
 }
 
+// registerModelsRoute lists the models the user's key can use, so the Settings model picker is never stale.
+// Every supported service exposes GET …/models returning {"data":[{"id":…}]}.
+func registerModelsRoute(mux *http.ServeMux) {
+	mux.HandleFunc("/api/models", func(w http.ResponseWriter, r *http.Request) {
+		provider := r.URL.Query().Get("provider")
+		cfgMu.Lock()
+		if _, ok := aiProviders[provider]; !ok {
+			provider = currentProvider()
+		}
+		key := providerKey(provider)
+		base := cfg.BaseURL
+		cfgMu.Unlock()
+		var url string
+		if provider == "anthropic" {
+			url = anthropicBase() + "/v1/models?limit=100"
+		} else {
+			b := openaiBaseFor(provider)
+			if provider == "custom" && b == "" && base == "" {
+				apiErr(w, 428, "Set the base URL for your custom AI service first.")
+				return
+			}
+			url = strings.TrimSuffix(strings.TrimRight(b, "/"), "/chat/completions") + "/models"
+		}
+		if key == "" && provider != "custom" {
+			apiErr(w, 428, "Save an API key for "+provider+" first.")
+			return
+		}
+		rq, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+		rq.Header.Set("User-Agent", appID+"/"+appVersion)
+		if provider == "anthropic" {
+			rq.Header.Set("x-api-key", key)
+			rq.Header.Set("anthropic-version", "2023-06-01")
+		} else if key != "" {
+			rq.Header.Set("Authorization", "Bearer "+key)
+		}
+		forward(w, rq)
+	})
+}
+
 func forward(w http.ResponseWriter, rq *http.Request) {
 	resp, err := aiClient.Do(rq)
 	if err != nil {

@@ -13,7 +13,7 @@ export GOOS=windows GOARCH=amd64 CGO_ENABLED=0
 # (gitignored): 352 hex chars = 44 eight-digit words, no 0x, no spaces.
 FZKEY="${TRACELAB_FZ_KEY:-}"
 if [ -z "$FZKEY" ] && [ -f build/fzkey.secret ]; then FZKEY="$(cat build/fzkey.secret)"; fi
-# Accept any pasted form ("0x25d8d248 0xe1502405, …", line breaks, the 352-char blob): keep only the hex digits.
+# Accept any pasted form ("0x12345678 0x9abcdef0, …", line breaks, the 352-char blob): keep only the hex digits.
 FZKEY="$(printf '%s' "$FZKEY" | sed 's/0[xX]//g' | tr -cd '0-9a-fA-F')"
 if [ -n "$FZKEY" ] && [ "${#FZKEY}" -ne 352 ]; then
   echo "warning: FZ key has ${#FZKEY} hex digits, expected 352 (44 words); building without it" >&2

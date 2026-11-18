@@ -1,7 +1,9 @@
-// Trace Lab repair assistant: Claude with tools that read the loaded boardview and schematic.
+// Flux, Trace Lab's repair assistant: an AI model with tools that read the loaded boardview and
+// schematic, the user's readings database and live bench instruments, and that can walk the user
+// through probing points one at a time.
 const $ = (s) => document.querySelector(s);
 
-const SYSTEM = `You are the repair assistant inside Trace Lab, a boardview and schematic viewer used by technicians doing component-level repair of laptop, desktop, phone, console and GPU motherboards.
+const SYSTEM = `You are Flux, the repair assistant inside Trace Lab, a boardview and schematic viewer used by technicians doing component-level repair of laptop, desktop, phone, console and GPU motherboards.
 
 You can inspect the board the user has open through tools:
 - board_overview: parts, likely power rails, ICs, connectors, schematic page headings.
@@ -13,6 +15,8 @@ You can inspect the board the user has open through tools:
 - highlight: select a net or part in the viewer so the user can see it.
 - get_readings: the user's diode-mode, voltage and resistance readings for this board, and which nets they marked known-good or faulty.
 - known_readings: search every board the user has worked on for a net name, to compare against a known-good value measured before or to see where a rail has failed previously.
+- bench_status / measure / instrument_history / scope_screenshot: live bench instruments the user has connected (multimeter, bench power supply, oscilloscope). measure takes a reading now; instrument_history shows how a value changed (e.g. the supply's current draw while the board tries to power on); scope_screenshot shows the scope's screen.
+- request_probe: ask the user to put the meter leads on one point. The app highlights the point on the board, switches a connected meter to the right function, shows the live reading and captures it when it's steady (or the user types it). You get the measured value back, and it's saved to the readings database.
 
 How to work:
 - Ground every specific claim (designators, net names, pin numbers, values, page numbers) in tool results. Never invent a designator, net or value. If the files don't show something, say so and say how the user can measure or check it.
@@ -21,6 +25,13 @@ How to work:
 - For shorts: identify the rail, the parts on it and their locations, then suggest finding the hot component with voltage injection (current-limited, never above the rail's nominal voltage), a thermal camera, freeze spray or isopropyl/rosin, or by lifting inductors/jumpers to split the rail. Point out the rail's subnets and the series parts that can be lifted to isolate sections.
 - Interpret the user's readings. Diode-mode and resistance values vary by board, so describe typical ranges as typical, compare against similar rails on the same board, and call known_readings to compare against a known-good value the user logged on another board before guessing. When the user marks a net known-good or faulty, treat that as ground truth.
 - Mention safety where relevant: ESD, battery disconnection, current limits when injecting, hot air near plastic connectors and BGA underfill.
+
+Bench instruments and guided diagnosis:
+- <app_context> lists connected instruments and their live readings. Use them: a supply stuck at a few tens of mA usually means only standby rails are up; current that rises then drops back means a protection or power-good failure; high current at low voltage or a supply in CC (current limiting) means a short.
+- When the user starts a guided diagnosis, or whenever a measurement is the next step, drive the session with request_probe: ONE point per call, chosen to split the problem in half. Say in 'why' what the reading will tell you, give an 'expected' range when you can, and state the board condition needed in 'condition' (e.g. "charger connected, board off" for voltages; "no power, battery disconnected" for diode and resistance).
+- After each reading, explain in one or two sentences what it means, then request the next probe. Use known_readings to compare with known-good values. Don't make the user type readings into chat.
+- Trace Lab only reads the power supply. Never claim to change its output; if the user needs to change voltage or current limit or inject voltage, tell them the exact values to set themselves.
+- Finish by summarising the readings that matter, the most likely faulty part(s) with designators, and how to confirm and fix.
 
 Style:
 - Be concise and practical. Use short numbered steps for procedures.
@@ -38,7 +49,16 @@ const TOOLS = [
   { name: "view_board", description: "Image of the board viewer. With 'focus', selects that net or part first so it is highlighted (primary net orange, subnets in other colours, pins on the far side as dashed rings).", input_schema: { type: "object", properties: { focus: { type: "string" }, side: { type: "string", enum: ["top", "bottom"] } } } },
   { name: "highlight", description: "Select a net or part in the viewer so the user sees it on the board and schematic.", input_schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
   { name: "get_readings", description: "All diode-mode, voltage and resistance readings the user has logged for the CURRENT board, by net, including which nets they marked known-good or faulty.", input_schema: { type: "object", properties: {} } },
-  { name: "known_readings", description: "Search the readings database across ALL boards the user has worked on for a net name, to compare the current board against a known-good value measured on another board, or to see where this rail has failed before. Returns board, net, good/bad label and values.", input_schema: { type: "object", properties: { net: { type: "string", description: "Net name or partial name to look up, e.g. PP3V3 or VCORE" }, status: { type: "string", enum: ["good", "bad"], description: "Optional: only known-good or only faulty readings" } }, required: ["net"] } },
+  { name: "bench_status", description: "The bench instruments the user has connected (multimeter, power supply, oscilloscope) with their live readings.", input_schema: { type: "object", properties: {} } },
+  { name: "measure", description: "Take a reading right now from a connected instrument, without asking the user to move the probes. Use it to read the bench supply's voltage and current draw, what the meter shows at the moment, or scope measurements.", input_schema: { type: "object", properties: { instrument: { type: "string", enum: ["multimeter", "power_supply", "oscilloscope"] }, mode: { type: "string", enum: ["voltage", "diode", "resistance", "ac_voltage", "continuity"], description: "Multimeter only: switch the meter to this function first (if it can be switched remotely)." }, channels: { type: "array", items: { type: "string" }, description: "Oscilloscope only: channels, e.g. [\"1\",\"2\"]" } }, required: ["instrument"] } },
+  { name: "instrument_history", description: "How a live reading changed over the last N seconds: min, max, average and a time series. Use it for the supply's current draw during power-on (stuck, cycling, rising) or a drifting meter reading.", input_schema: { type: "object", properties: { instrument: { type: "string", enum: ["power_supply", "multimeter"] }, seconds: { type: "integer", description: "5 to 600, default 60" } }, required: ["instrument"] } },
+  { name: "scope_screenshot", description: "Grab the connected oscilloscope's screen as an image, to see waveform shape (switching node, clock, ripple, PWM, data activity).", input_schema: { type: "object", properties: {} } },
+  { name: "request_probe", description: "Ask the user to place the meter leads on ONE point and wait for the reading. The app highlights the point on the board, switches a connected multimeter to the right function, shows the live value, captures it when steady (or the user types it), saves it to the readings database and returns it. Call it once per measurement.", input_schema: { type: "object", properties: {
+    net: { type: "string", description: "Net to measure, exactly as named in the boardview" }, part: { type: "string", description: "Optional: probe on this part's pin" }, pin: { type: "string", description: "Optional: pin number/name of that part" },
+    mode: { type: "string", enum: ["voltage", "diode", "resistance", "ac_voltage", "continuity"] },
+    leads: { type: "string", description: "Optional lead placement if not the default (default: voltage/resistance red on the point, black on ground; diode mode red on ground, black on the point)" },
+    why: { type: "string", description: "One sentence: what this reading will tell us" }, expected: { type: "string", description: "Expected/healthy range, e.g. '0.35-0.65 V' or '≈3.3 V'" }, condition: { type: "string", description: "Board state for the measurement, e.g. 'charger connected, board off'" } }, required: ["mode", "why"] } },
+  { name: "known_readings", description: "Search the readings database across ALL boards the user has worked on for a net name, to compare the current board against a known-good value measured on another board, or to see where this rail has failed before. Returns board, net, good/bad label and values.", input_schema: { type: "object", properties: { net: { type: "string", description: "Net name or partial name to look up, e.g. PP3V3 or VCORE. Leave empty to list the most recent readings on every board." }, status: { type: "string", enum: ["good", "bad"], description: "Optional: only known-good or only faulty readings" } } } },
 ];
 
 const RAIL_RE = /^(PP|\+)|^V[A-Z0-9_]*$|\d+V\d*|\dP\d+V|VCC|VDD|VIN|VBUS|VBAT|DCIN|ADAPTER|BATT|_RTC|VCORE|VGFX|VDDQ|VTT/i;
@@ -168,14 +188,150 @@ export function initAssistant(app) {
         const qs = new URLSearchParams({ net: net || "" }); if (status) qs.set("status", status); if (b) qs.set("exclude", b.name);
         const r = await app.api("/api/readings/search?" + qs.toString()); if (!r.ok) return "Couldn't search the readings database.";
         const hits = await r.json();
-        if (!hits.length) return `No logged readings match "${net}"${status ? " (" + status + ")" : ""} on any board yet. Known-good values build up as the user marks nets.`;
-        return `Readings matching "${net}" across boards (most recent first):\n` + hits.map((h) => `${h.board} · ${h.net}${h.status ? " [" + (h.status === "good" ? "known good" : "fault") + "]" : ""}: ` + [h.diode && `diode ${h.diode}`, h.volts && `${h.volts} V`, h.ohms && `${h.ohms} Ω to GND`, h.note && `note: ${h.note}`].filter(Boolean).join(", ")).join("\n");
+        if (!hits.length) return `No saved readings match "${net || "anything"}"${status ? " (" + status + ")" : ""} on any board yet. Known-good values build up as the user marks nets.`;
+        return `${net ? `Readings matching "${net}"` : "Most recent readings"} across boards (most recent first):\n` + hits.map((h) => `${h.board} · ${h.net}${h.status ? " [" + (h.status === "good" ? "known good" : "fault") + "]" : ""}: ` + [h.diode && `diode ${h.diode}`, h.volts && `${h.volts} V`, h.ohms && `${h.ohms} Ω to GND`, h.note && `note: ${h.note}`].filter(Boolean).join(", ")).join("\n");
       } catch (e) { return "Couldn't search the readings database: " + e.message; }
     },
+    bench_status() { const bn = app.bench; if (!bn) return "Bench instruments need the desktop app."; return bn.summary() + (bn.hasAny() ? "" : "\nNothing is connected right now. request_probe still works: the user types the reading."); },
+    async measure({ instrument, mode, channels }) {
+      const bn = app.bench; if (!bn) return "Bench instruments need the desktop app.";
+      const kind = { multimeter: "dmm", power_supply: "psu", oscilloscope: "scope" }[instrument] || "dmm";
+      const q = { kind }; if (mode) q.mode = MODES[mode]; if (channels && channels.length) { q.channels = channels.map(String); q.items = ["vpp", "vmax", "vmin", "vavg", "freq"]; }
+      if (kind === "scope" && !q.items) q.items = ["vpp", "vmax", "vmin", "vavg", "freq"];
+      try {
+        const x = await bn.measure(q); const it = x.instrument;
+        if (x.scope) return `${it.name} (oscilloscope): ${x.scope.text}`;
+        return bn.describe(it);
+      } catch (e) { return "Couldn't read it: " + e.message; }
+    },
+    async instrument_history({ instrument, seconds = 60 }) {
+      const bn = app.bench; if (!bn) return "Bench instruments need the desktop app.";
+      const kind = instrument === "multimeter" ? "dmm" : "psu"; seconds = Math.max(5, Math.min(600, seconds | 0 || 60));
+      try {
+        const h = await bn.history(kind, seconds); const sm = h.samples || []; if (!sm.length) return `No ${kind === "psu" ? "supply" : "meter"} readings recorded in the last ${seconds} s.`;
+        const vs = sm.map((x) => x.v), unit = kind === "psu" ? "A" : ""; const t1 = sm[sm.length - 1].t;
+        const mn = Math.min(...vs), mx = Math.max(...vs), avg = vs.reduce((a, b) => a + b, 0) / vs.length;
+        const step = Math.max(1, Math.ceil(sm.length / 40)); const series = [];
+        for (let i = 0; i < sm.length; i += step) { const x = sm[i]; series.push(`${((x.t - t1) / 1000).toFixed(1)}s: ${x.v.toFixed(4)}${unit}${kind === "psu" ? ` @ ${x.w.toFixed(2)}V` : ""}`); }
+        return `${h.instrument}, last ${seconds} s (${sm.length} samples${kind === "dmm" ? ", mode " + h.mode : ""}): min ${mn.toFixed(4)}${unit}, max ${mx.toFixed(4)}${unit}, average ${avg.toFixed(4)}${unit}.\nSeries (seconds before now):\n${series.join("\n")}`;
+      } catch (e) { return "Couldn't read the history: " + e.message; }
+    },
+    async scope_screenshot() {
+      const bn = app.bench; if (!bn) return "Bench instruments need the desktop app.";
+      try { const png = await bn.screenshot(); const s2 = bn.connected("scope"); return [{ type: "text", text: `Screen of ${s2 ? s2.name : "the oscilloscope"}${s2 && s2.state.scope ? ". Measurements: " + s2.state.scope.text : ""}.` }, { type: "image", source: { type: "base64", media_type: "image/png", data: png } }]; }
+      catch (e) { return "Couldn't grab the scope screen: " + e.message; }
+    },
+    request_probe(input) { return probe(input); },
   };
+  const MODES = { voltage: "dcv", diode: "diode", resistance: "res", ac_voltage: "acv", continuity: "cont" };
+  const MODE_NAME = { dcv: "DC voltage", diode: "Diode mode", res: "Resistance", acv: "AC voltage", cont: "Continuity" };
+
+  /* ---------------- probe requests ---------------- */
+  let probeN = 0, activeProbe = null, curBubble = null, curSignal = null;
+  function pinNet(part, pin) {
+    const b = board(); const p = resolvePart(part); if (!b || !p) return null;
+    const pi = p.pins.find((i) => String(b.pins[i].num).toUpperCase() === String(pin).toUpperCase()); return pi === undefined ? null : { pi, net: b.pins[pi].net };
+  }
+  // A handy place to put the probe on a net: a test point or small 2-pin part on the visible side.
+  function probeSpot(net) {
+    const b = board(); if (!b) return null; const arr = b.nets.get(net) || []; let best = null, score = -1;
+    for (const i of arr) { const p = b.pins[i], part = b.parts[p.part]; const pre = prefix(part.name);
+      let sc = pre === "TP" || part.nail ? 5 : /^P?C$/.test(pre) && part.pins.length === 2 ? 4 : part.pins.length === 2 ? 3 : 1; if (part.side === "T") sc += 0.5;
+      if (sc > score) { score = sc; best = { part: part.name, pin: p.num, side: part.side, pi: i }; } }
+    return best;
+  }
+  const fmtDb = (mode, v, ol) => ol ? "OL" : mode === "res" || mode === "cont" ? (v >= 1e6 ? (v / 1e6).toFixed(2) + "M" : v >= 1e3 ? (v / 1e3).toFixed(2) + "k" : v.toFixed(1)) : v.toFixed(3);
+  function parseManual(t) {
+    t = String(t).trim(); if (!t) return null; if (/^o\.?l\.?$|^open$|^inf/i.test(t)) return { v: 9.9e37, ol: true };
+    const m = t.replace(",", ".").match(/^([-+]?\d*\.?\d+)\s*([kKmMuµ]?)/); if (!m) return null;
+    const mult = { k: 1e3, K: 1e3, M: 1e6, m: 1e-3, u: 1e-6, "µ": 1e-6 }[m[2]] || 1; return { v: parseFloat(m[1]) * mult, ol: false };
+  }
+  function probe(inp) {
+    const b = board(); if (!b) return "No boardview is loaded, so there's nothing to point the user at.";
+    const mode = MODES[inp.mode] || "dcv"; let net = inp.net ? resolveNet(inp.net) : null, pinInfo = null;
+    if (inp.part && inp.pin) { pinInfo = pinNet(inp.part, inp.pin); if (!pinInfo) return `Part ${inp.part} has no pin ${inp.pin}.` + suggest(inp.part); if (!net) net = pinInfo.net; }
+    if (!net && inp.net) return `No net named "${inp.net}".` + suggest(inp.net);
+    if (!net) return "Give a net (or a part and pin) to probe.";
+    const spot = pinInfo ? { part: resolvePart(inp.part).name, pin: inp.pin, pi: pinInfo.pi, side: b.parts[b.pins[pinInfo.pi].part].side } : probeSpot(net);
+    app.select({ type: "net", name: net }, spot ? { pin: spot.pi } : {});
+    const gnd = [...b.gnd][0] || "GND";
+    const where = spot ? `${spot.part} pin ${spot.pin} (${sideName(spot.side)} side)` : "any pin on the net";
+    const leads = inp.leads || (mode === "diode" ? `Red lead on ${gnd}, black lead on ${net}` : mode === "res" || mode === "cont" ? `Red lead on ${net}, black lead on ${gnd}` : `Red lead on ${net}, black lead on ${gnd}`);
+    open(true);
+    const bn = app.bench; const meter = bn && bn.connected("dmm"); const remote = meter && (meter.modes || []).includes(mode);
+    if (bn) { bn.hint(net); bn.setFast(true); if (remote && meter.state.meter && meter.state.meter.mode !== mode) bn.setMode(mode); }
+    const n = ++probeN; const card = document.createElement("div"); card.className = "probe";
+    const auto = (() => { try { return localStorage.getItem("tl.autocap") !== "0"; } catch (e) { return true; } })();
+    card.innerHTML = `<div class="ph">Probe ${n}<span class="mode">${MODE_NAME[mode]}</span></div>
+      <div class="leads"><span class="k red">Point</span><span><b>${app.esc(net)}</b> · e.g. ${app.esc(where)} <button class="linkbtn" data-p="show" style="margin:0">Show</button></span>
+        <span class="k blk">Leads</span><span>${app.esc(leads)}</span>
+        ${inp.condition ? `<span class="k blk">Board</span><span>${app.esc(inp.condition)}</span>` : ""}</div>
+      <div class="why">${app.esc(inp.why || "")}</div>${inp.expected ? `<div class="exp">Expected: ${app.esc(inp.expected)}</div>` : ""}
+      ${meter ? `<div class="live"><div class="lcd ol" data-p="lcd">—</div><div class="st" data-p="st">${remote ? "Meter set to " + MODE_NAME[mode] : "Set " + app.esc(meter.name) + " to " + MODE_NAME[mode]}</div></div><div class="bar2"><i data-p="bar"></i></div>
+        <div class="row2"><button class="btn primary" data-p="cap">Capture <span class="kbd" style="margin-left:4px">Space</span></button><label class="chk"><input type="checkbox" data-p="auto" ${auto ? "checked" : ""}>Capture when steady</label></div>` :
+        `<div class="foot">No multimeter connected, so type what your meter reads. <button class="linkbtn" data-p="setup" style="margin:0">Connect a meter</button></div>`}
+      <div class="row2"><input data-p="man" placeholder="${meter ? "Or type a value" : "Reading, e.g. 0.452 or 3.31 or 12k or OL"}" aria-label="Type the reading"><button class="btn${meter ? "" : " primary"}" data-p="use">Use value</button><button class="btn" data-p="skip" title="Can't reach this point, or want to skip it">Skip</button></div>`;
+    (curBubble || log).appendChild(card); scroll();
+    const q = (k) => card.querySelector(`[data-p="${k}"]`);
+    return new Promise((resolve) => {
+      let samples = [], baseline = null, t0 = Date.now(), last = null, done = false, lastUpd = 0;
+      const finish = async (val, how) => {
+        if (done) return; done = true; activeProbe = null; unsub && unsub(); if (bn) bn.setFast(false); document.removeEventListener("keydown", onKey, true);
+        card.classList.add("done");
+        let saved = false, text;
+        if (val === null) { text = `The user skipped ${net}${how ? ": " + how : ""}. Choose another point or approach.`; card.querySelectorAll(".row2,.live,.bar2").forEach((e) => e.remove()); card.insertAdjacentHTML("beforeend", `<div class="res skip">Skipped${how ? ": " + app.esc(how) : ""}</div>`); }
+        else {
+          const disp = val.ol ? "OL (open / over range)" : val.text || fmtDb(mode, val.v, false) + (mode === "res" || mode === "cont" ? " Ω" : " V");
+          const field = { diode: "diode", dcv: "volts", res: "ohms", cont: "ohms" }[mode];
+          if (field && app.saveReadingFor) { const r = await app.saveReadingFor(net, { [field]: fmtDb(mode, val.v, val.ol) }); saved = r && r.ok; }
+          const psu = bn && bn.connected("psu"); const ps = psu && psu.state.psu ? ` Bench supply at that moment: ${psu.state.psu.volts.toFixed(2)} V, ${psu.state.psu.amps.toFixed(4)} A${psu.state.psu.cc ? " (current limiting)" : ""}.` : "";
+          text = `Measured ${net}${spot ? ` at ${spot.part}.${spot.pin}` : ""}, ${MODE_NAME[mode]}${mode === "diode" ? " (" + leads + ")" : ""}: ${disp} (${how}).${saved ? " Saved to the readings database." : ""}${ps}`;
+          card.querySelectorAll(".row2,.live,.bar2").forEach((e) => e.remove()); card.insertAdjacentHTML("beforeend", `<div class="res">✓ ${app.esc(disp)} <span class="foot" style="font-family:var(--f-ui);font-weight:400">· ${app.esc(how)}${saved ? " · saved to database" : ""}</span></div>`);
+        }
+        scroll(); resolve(text);
+      };
+      activeProbe = { finish, net };
+      const capture = (how) => { if (last && last.meter) finish({ v: last.meter.value, ol: last.meter.ol, text: last.meter.text }, how || `captured from ${meter.name}`); };
+      const onKey = (e) => { if (e.key === " " && !e.target.closest("input,textarea,select,button")) { e.preventDefault(); capture(); } };
+      document.addEventListener("keydown", onKey, true);
+      let unsub = null;
+      if (meter) {
+        unsub = bn.onUpdate((items) => {
+          const m = items.find((i) => i.id === meter.id); if (!m || !m.state.meter || done) return; last = m.state; if (m.state.updated === lastUpd) return; lastUpd = m.state.updated;
+          const r = m.state.meter, lcd = q("lcd"), st = q("st"), bar = q("bar"); if (!lcd) return;
+          lcd.textContent = r.text; lcd.classList.toggle("ol", !!r.ol);
+          const wrongMode = r.mode !== mode && !(mode === "cont" && r.mode === "res");
+          const now = Date.now(); samples.push({ t: now, v: r.value, ol: r.ol }); samples = samples.filter((x) => x.t > now - 1300);
+          if (!baseline && now - t0 > 500) baseline = { v: r.value, ol: r.ol };
+          const tol = Math.max(Math.abs(r.value) * 0.01, mode === "res" || mode === "cont" ? 0.5 : 0.004);
+          const steady = samples.length >= 3 && samples[0].t < now - 1000 && samples.every((x) => !x.ol && Math.abs(x.v - r.value) <= tol);
+          const span = samples.length ? Math.min(1, (now - samples.findLast((x, i) => i === 0 || x.ol || Math.abs(x.v - r.value) > tol).t) / 1200) : 0;
+          if (bar) bar.style.width = (r.ol ? 0 : Math.round(span * 100)) + "%";
+          const moved = baseline && (baseline.ol ? !r.ol : Math.abs(r.value - baseline.v) > tol * 3);
+          if (wrongMode) { st.className = "st"; st.textContent = `Meter is on ${(app.bench.modeLabels()[r.mode] || r.mode)}. Switch it to ${MODE_NAME[mode]}.`; return; }
+          st.className = "st" + (steady ? " ok" : ""); st.textContent = r.ol ? "Waiting for the leads…" : steady ? (moved ? "Steady" : "Steady. Press Capture if this is the point") : "Settling…";
+          const ac = q("auto"); if (steady && moved && ac && ac.checked) capture(`captured from ${meter.name} when steady`);
+        });
+      }
+      card.addEventListener("click", (e) => {
+        const t = e.target.closest("[data-p]"); if (!t) return; const k = t.dataset.p;
+        if (k === "show") { app.select({ type: "net", name: net }, spot ? { pin: spot.pi } : {}); if (spot) app.selectByName(net); }
+        else if (k === "cap") capture();
+        else if (k === "setup") bn && bn.openSetup();
+        else if (k === "use") { const v = parseManual(q("man").value); if (!v) { q("man").focus(); q("man").placeholder = "Enter a number, e.g. 0.452, 12k or OL"; return; } finish({ v: v.v, ol: v.ol }, "typed by the user"); }
+        else if (k === "skip") finish(null, q("man").value.trim());
+      });
+      card.addEventListener("change", (e) => { if (e.target.dataset.p === "auto") { try { localStorage.setItem("tl.autocap", e.target.checked ? "1" : "0"); } catch (x) {} } });
+      card.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.dataset.p === "man") { e.preventDefault(); q("use").click(); } });
+      if (curSignal) curSignal.addEventListener("abort", () => finish(null, "session stopped"), { once: true });
+      setTimeout(() => (meter ? card : q("man")).focus && (meter ? null : q("man").focus()), 50);
+    });
+  }
   function fmtReading(n, r) { return `${n}: ` + [r.status && (r.status === "good" ? "KNOWN GOOD" : "FAULT"), r.diode && `diode ${r.diode}`, r.volts && `voltage ${r.volts} V`, r.ohms && `to GND ${r.ohms} Ω`, r.note && `note: ${r.note}`].filter(Boolean).join(", "); }
   const TOOL_LABEL = { board_overview: () => "Reading board overview", find: (i) => `Searching “${i.query || ""}”`, get_net: (i) => `Checking net ${i.name || ""}`, get_part: (i) => `Checking part ${i.name || ""}`,
-    read_schematic_text: (i) => `Reading schematic ${i.near ? "near " + i.near : "p." + (i.page || "")}`, view_schematic: (i) => `Viewing schematic ${i.near ? "at " + i.near : "p." + (i.page || "")}`, view_board: (i) => `Viewing board${i.focus ? " at " + i.focus : ""}`, highlight: (i) => `Highlighting ${i.name || ""}`, get_readings: () => "Reading your measurements", known_readings: (i) => `Known readings for ${i.net || ""}` };
+    read_schematic_text: (i) => `Reading schematic ${i.near ? "near " + i.near : "p." + (i.page || "")}`, view_schematic: (i) => `Viewing schematic ${i.near ? "at " + i.near : "p." + (i.page || "")}`, view_board: (i) => `Viewing board${i.focus ? " at " + i.focus : ""}`, highlight: (i) => `Highlighting ${i.name || ""}`, get_readings: () => "Reading your measurements", known_readings: (i) => `Known readings for ${i.net || ""}`,
+    bench_status: () => "Checking the bench", measure: (i) => `Reading the ${(i.instrument || "meter").replace("_", " ")}`, instrument_history: (i) => `Looking at ${(i.instrument || "").replace("_", " ")} history`,
+    scope_screenshot: () => "Grabbing the scope screen", request_probe: (i) => `Probe ${i.net || (i.part ? i.part + "." + (i.pin || "") : "")}` };
 
   /* ---------------- context + UI ---------------- */
   function contextBlock() {
@@ -184,11 +340,13 @@ export function initAssistant(app) {
     L.push(sch ? `Schematic: ${sch.name}, ${sch.pages.length} pages${sch.noText ? ", no text layer" : ""}. Viewer is on page ${app.sv.page + 1}.` : "Schematic: none loaded.");
     if (sel) L.push(`Current selection: ${sel.type} ${sel.name}.`);
     const rd = app.getReadings(); const ks = Object.keys(rd); if (ks.length) L.push("Logged readings:\n" + ks.slice(0, 40).map((k) => fmtReading(k, rd[k])).join("\n"));
+    if (app.bench && app.bench.items.length) L.push("Bench instruments:\n" + app.bench.summary());
     return `<app_context>\n${L.join("\n")}\n</app_context>`;
   }
   function renderCtx() {
     const b = board(), sel = S.sel;
-    ctxEl.innerHTML = b ? `Context: <b>${app.esc(b.name)}</b>${S.sch ? " + schematic" : ""}${sel ? ` · selected <b>${app.esc(sel.name)}</b>` : ""}` : "Open a boardview to give the assistant something to read.";
+    const nb = app.bench ? app.bench.items.filter((i) => i.state.status === "connected").length : 0;
+    ctxEl.innerHTML = b ? `Context: <b>${app.esc(b.name)}</b>${S.sch ? " + schematic" : ""}${sel ? ` · selected <b>${app.esc(sel.name)}</b>` : ""}${nb ? ` · ${nb} instrument${nb > 1 ? "s" : ""} live` : ""}` : "Open a boardview to give Flux something to read.";
     const qs = !sel ? ["The board won't power on. Where do I start?", "Map the main power rails and what creates each one", "Walk me through this board's power-on sequence"]
       : sel.type === "net" ? [`Diagnose ${sel.name}`, `What generates ${sel.name} and what enables it?`, `${sel.name} is shorted to ground. How do I find the short?`, `What readings should ${sel.name} have?`]
       : sel.type === "part" ? [`What does ${sel.name} do?`, `How do I test ${sel.name}?`, `What powers ${sel.name}?`] : [`Where is ${sel.name} used?`];
@@ -206,16 +364,62 @@ export function initAssistant(app) {
   });
   function emptyState() {
     const ready = app.config.hasKey || app.config.provider === "custom";
-    log.innerHTML = `<div class="ai-empty"><h3>Repair assistant</h3><div>Ask about a fault, a rail or a part. The assistant reads this board and its schematic, looks at schematic pages, and uses the readings you log on each net.</div>${ready ? "" : `<div class="notice">Connect an AI service in <button class="btn" data-act="settings">Settings</button> to turn the assistant on. Works with Claude, OpenAI, Gemini, OpenRouter or a local model.</div>`}</div>`;
+    log.innerHTML = `<div class="ai-empty"><h3>Hi, I'm Flux.</h3><div>Ask about a fault, a rail or a part. I read this board and its schematic, your saved readings, and any meter, supply or scope you connect.</div><div>Press <button class="btn" data-act="guide">Guided diagnosis</button> and I'll ask you to probe points one at a time and work out the fault from your readings.</div>${ready ? "" : `<div class="notice">Connect an AI service in <button class="btn" data-act="settings">Settings</button> to turn me on. Works with Claude, OpenAI, Gemini, OpenRouter or a local model.</div>`}</div>`;
   }
   log.addEventListener("click", (e) => {
     const r = e.target.closest(".ref"); if (r) { app.selectByName(r.dataset.name); return; }
     if (e.target.closest("[data-act=settings]")) app.openSettings();
+    if (e.target.closest("[data-act=guide]")) guideCard();
   });
   input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(180, input.scrollHeight) + "px"; });
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
   form.addEventListener("submit", (e) => { e.preventDefault(); if (busy) { ctrl && ctrl.abort(); return; } const t = input.value.trim(); if (t) send(t); });
   $("#aiNew").addEventListener("click", () => { if (busy && ctrl) ctrl.abort(); messages = []; emptyState(); renderCtx(); });
+  $("#aiGuide").addEventListener("click", () => guideCard());
+
+  /* ---------------- floating panel ---------------- */
+  const panel = $("#aiPane");
+  function open(on) { app.toggleAI(on === undefined ? true : on); }
+  (() => { // drag the panel by its header; remember where it was left
+    const head = $("#aiHead"); let d = null;
+    try { const p = JSON.parse(localStorage.getItem("tl.fluxpos") || "null"); if (p) { panel.style.right = p.r + "px"; panel.style.bottom = p.b + "px"; } } catch (e) {}
+    head.addEventListener("pointerdown", (e) => { if (e.target.closest("button")) return; const r = panel.getBoundingClientRect(); d = { x: e.clientX, y: e.clientY, r: window.innerWidth - r.right, b: window.innerHeight - r.bottom }; head.setPointerCapture(e.pointerId); });
+    head.addEventListener("pointermove", (e) => { if (!d) return; const r = Math.max(0, Math.min(window.innerWidth - 200, d.r - (e.clientX - d.x))), bb = Math.max(0, Math.min(window.innerHeight - 120, d.b - (e.clientY - d.y))); panel.style.right = r + "px"; panel.style.bottom = bb + "px"; });
+    head.addEventListener("pointerup", () => { if (!d) return; d = null; try { localStorage.setItem("tl.fluxpos", JSON.stringify({ r: parseInt(panel.style.right) || 18, b: parseInt(panel.style.bottom) || 58 })); } catch (e) {} });
+    head.addEventListener("dblclick", (e) => { if (e.target.closest("button")) return; panel.style.right = ""; panel.style.bottom = ""; panel.style.width = ""; panel.style.height = ""; try { localStorage.removeItem("tl.fluxpos"); } catch (x) {} });
+  })();
+  $("#aiMin").addEventListener("click", () => open(false));
+
+  /* ---------------- guided diagnosis ---------------- */
+  const SYMPTOMS = ["Dead, no power", "Won't charge", "Short on a rail", "Powers on, no display", "Turns off or restarts", "Liquid damage"];
+  function guideCard() {
+    open(true);
+    if (!messages.length) log.innerHTML = "";
+    log.querySelectorAll(".guide").forEach((g) => g.remove());
+    const sel = S.sel && S.sel.type === "net" ? S.sel.name : null; const bn = app.bench;
+    const live = bn ? bn.items.filter((i) => i.state.status === "connected") : [];
+    const card = document.createElement("div"); card.className = "guide";
+    card.innerHTML = `<h4>Guided diagnosis</h4><p>I'll ask you to probe one point at a time, read your meter live, and narrow down the fault from the readings. Every reading is saved to your database.</p>
+      <div class="chips" role="group" aria-label="Symptom">${SYMPTOMS.map((t) => `<button type="button" class="chip" aria-pressed="false">${t}</button>`).join("")}</div>
+      <textarea placeholder="Anything else? e.g. 20 V at 0.02 A on the supply, fan spins then stops, was dropped" aria-label="Details"></textarea>
+      ${sel ? `<label class="chk"><input type="checkbox" data-g="from" checked>Start from ${app.esc(sel)}</label>` : ""}
+      <div class="tools">${live.length ? "Live: " + live.map((i) => `<i class="sdot connected" style="display:inline-block;margin:0 4px 0 6px"></i>${app.esc(i.name)}`).join("") + (live.some((i) => i.kind === "dmm") ? ". I'll switch the meter's function for each probe when it supports it." : ". No meter connected, so you'll type readings in.")
+        : `No instruments connected, so you'll type readings in. <button class="linkbtn" data-g="setup" style="margin:0">Connect a meter or supply</button>`}</div>
+      <div class="row2"><button class="btn primary" data-g="go"${board() ? "" : " disabled"}>Start guided diagnosis</button>${board() ? "" : `<span class="foot">Open a boardview first.</span>`}</div>`;
+    log.appendChild(card); scroll();
+    card.addEventListener("click", (e) => {
+      const c = e.target.closest(".chip"); if (c) { c.setAttribute("aria-pressed", c.getAttribute("aria-pressed") !== "true"); return; }
+      const g = e.target.closest("[data-g]"); if (!g) return;
+      if (g.dataset.g === "setup") bn && bn.openSetup();
+      if (g.dataset.g === "go") {
+        const sym = [...card.querySelectorAll(".chip[aria-pressed=true]")].map((x) => x.textContent); const extra = card.querySelector("textarea").value.trim();
+        const from = sel && card.querySelector("[data-g=from]") && card.querySelector("[data-g=from]").checked ? sel : null;
+        const shown = `Guided diagnosis: ${sym.join(", ") || "help me find the fault"}${extra ? " — " + extra : ""}${from ? ` (start at ${from})` : ""}`;
+        const prompt = `Start a guided diagnosis.\nSymptom: ${sym.join(", ") || "not given, ask me if you need it"}.${extra ? "\nDetails: " + extra : ""}${from ? "\nStart from net " + from + "." : ""}\nLead me step by step: check the board files first, then ask me to probe one point at a time with request_probe, use each reading before choosing the next point, watch the bench supply's current draw if one is connected, and finish with the most likely faulty part(s) and how to confirm.`;
+        card.remove(); send(prompt, { display: shown, guided: true });
+      }
+    });
+  }
 
   function addUser(text) { const d = document.createElement("div"); d.className = "msg user"; d.textContent = text; log.appendChild(d); scroll(); }
   function addBot() { const d = document.createElement("div"); d.className = "msg bot"; log.appendChild(d); return d; }
@@ -235,11 +439,15 @@ export function initAssistant(app) {
     return { text: text || "(image attached)", images };
   }
   function prepared() {
-    const out = JSON.parse(JSON.stringify(messages)); let keep = 3; // keep images only in the 3 most recent tool turns
+    // Keep requests small: every tool step resends the history, and low-tier API plans have tight
+    // per-minute token limits. Images survive only in the latest tool turn; older tool text is shortened.
+    const out = JSON.parse(JSON.stringify(messages)); let seen = 0;
     for (let i = out.length - 1; i >= 0; i--) {
-      const m = out[i]; if (m.role !== "tool" || !m.results.some((r) => r.images && r.images.length)) continue;
-      if (keep > 0) { keep--; continue; }
-      m.results.forEach((r) => { if (r.images && r.images.length) { r.text = (r.text ? r.text + " " : "") + "[earlier image removed to save context; call the view tool again if needed]"; r.images = []; } });
+      const m = out[i]; if (m.role !== "tool") continue; seen++;
+      m.results.forEach((r) => {
+        if (seen > 1 && r.images && r.images.length) { r.text = (r.text ? r.text + " " : "") + "[earlier image removed to save context; call the view tool again if needed]"; r.images = []; }
+        if (seen > 2 && r.text && r.text.length > 1500) r.text = r.text.slice(0, 1500) + "\n…[earlier tool output shortened; call the tool again for full detail]";
+      });
     }
     return out;
   }
@@ -269,20 +477,40 @@ export function initAssistant(app) {
   async function postStream(provider, body, signal) {
     const r = await app.api("/api/messages", { method: "POST", headers: { "Content-Type": "application/json", "X-TL-Provider": provider }, body: JSON.stringify(body), signal });
     if (!r.ok) {
-      let j = null; try { j = await r.json(); } catch (e) {}
-      const em = j && j.error && (j.error.message || j.error.code);
-      const who = providerLabel(); let msg = `The assistant request failed (HTTP ${r.status}).`; let settings = false;
+      let j = null; try { j = JSON.parse(await r.text()); } catch (e) {}
+      if (Array.isArray(j)) j = j[0]; // Gemini wraps errors in an array
+      const eo = (j && (j.error || j)) || {};
+      const em = typeof eo.message === "string" ? eo.message : "";
+      const code = String(eo.code || eo.status || eo.type || "");
+      const who = providerLabel(); let msg = `The assistant request failed (HTTP ${r.status}).`; let settings = false, retry = false;
+      const quota = /insufficient_quota|billing|credit|exceeded your current quota|quota exceeded|RESOURCE_EXHAUSTED.*(day|daily)|per day/i.test(code + " " + em);
       if (r.status === 401 || r.status === 403) { msg = `${who} rejected the API key. Check it in Settings.`; settings = true; }
       else if (r.status === 428) { msg = em || `Set up the ${who} connection in Settings first.`; settings = true; }
-      else if (r.status === 404 && em && /model|not found|does not exist/i.test(em)) { msg = `The model "${body.model}" isn't available on ${who}. Pick another in Settings.`; settings = true; }
-      else if (r.status === 400 && em && /image|vision|multimodal/i.test(em)) { msg = `The model "${body.model}" can't read images, which the assistant sends. Pick a vision model in Settings. (${em})`; settings = true; }
-      else if (r.status === 429) msg = `${who} rate-limited the request. Wait a moment and try again.`;
-      else if (r.status === 502) msg = `Trace Lab couldn't reach ${who}.` + (em ? " " + em : " Check your connection.");
-      else if (r.status === 503 || r.status === 529) msg = `${who} is overloaded right now. Try again shortly.`;
-      else if (em) msg += " " + em;
-      const e = new Error(msg); e.settings = settings; throw e;
+      else if (r.status === 404) { msg = `${who} doesn't offer the model "${body.model}" to your key. Open Settings and pick one from the list (use "Load models").`; settings = true; }
+      else if (r.status === 400 && /image|vision|multimodal/i.test(em)) { msg = `The model "${body.model}" can't read images, which the assistant sends. Pick a vision model in Settings.`; settings = true; }
+      else if (r.status === 429 && quota) { msg = `${who} says your account is out of credit or quota, so it refused the request. ` + (app.config.provider === "openai" ? "Add prepaid credit at platform.openai.com → Settings → Billing, then try again." : "Check your plan or billing with the provider, or switch service in Settings."); settings = true; }
+      else if (r.status === 429) { msg = `${who} rate-limited the request.`; retry = true; }
+      else if (r.status === 502) msg = `Trace Lab couldn't reach ${who}.` + (em ? "" : " Check your connection.");
+      else if (r.status === 500 || r.status === 503 || r.status === 529) { msg = `${who} is overloaded or had an error.`; retry = true; }
+      if (em && !msg.includes(em)) msg += ` (${who}: ${em.slice(0, 300)})`;
+      const e = new Error(msg); e.settings = settings; e.retry = retry; e.status = r.status;
+      e.retryAfter = parseFloat(r.headers.get("retry-after")) || 0; throw e;
     }
     return r;
+  }
+  // Retry rate limits and transient overloads with the server's Retry-After, else exponential backoff.
+  async function withRetry(fn, bubble, signal) {
+    for (let attempt = 0; ; attempt++) {
+      try { return await fn(); }
+      catch (err) {
+        if (!err.retry || attempt >= 3 || signal.aborted) throw err;
+        const wait = Math.min(60, err.retryAfter || 5 * 2 ** attempt);
+        const note = document.createElement("p"); note.className = "foot";
+        note.textContent = `${err.message} Retrying in ${Math.round(wait)} s (attempt ${attempt + 2} of 4)…`; bubble.appendChild(note); scroll();
+        await new Promise((res, rej) => { const t = setTimeout(res, wait * 1000); signal.addEventListener("abort", () => { clearTimeout(t); rej(Object.assign(new Error("Stopped"), { name: "AbortError" })); }, { once: true }); });
+        note.remove();
+      }
+    }
   }
   // ---- Anthropic Messages API ----
   function toAnthropic(neu) {
@@ -316,52 +544,65 @@ export function initAssistant(app) {
   }
   // ---- OpenAI-compatible Chat Completions (OpenAI, Gemini, OpenRouter, local/custom) ----
   const openaiTools = TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } }));
-  function toOpenAI(neu) {
+  function toOpenAI(neu, provider) {
     const out = [{ role: "system", content: SYSTEM }];
     for (const m of neu) {
       if (m.role === "user") out.push({ role: "user", content: m.text });
-      else if (m.role === "assistant") { const msg = { role: "assistant", content: m.text || null }; if (m.calls && m.calls.length) msg.tool_calls = m.calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.input || {}) } })); out.push(msg); }
+      else if (m.role === "assistant") { const msg = { role: "assistant", content: m.text || null }; if (m.calls && m.calls.length) msg.tool_calls = m.calls.map((c, i) => {
+          const tc = { id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.input || {}) } };
+          // Gemini 3 needs its thought signature echoed back on each function call. Calls made by another provider
+          // earlier in the chat have none, so the first call of the turn gets Google's documented bypass value.
+          if (c.extra) tc.extra_content = c.extra;
+          else if (provider === "gemini" && i === 0) tc.extra_content = { google: { thought_signature: "skip_thought_signature_validator" } };
+          return tc;
+        });
+        if (m.reasoning && m.reasoning.length) msg.reasoning_details = m.reasoning; // OpenRouter: keeps Gemini/other reasoning state across tool calls
+        out.push(msg); }
       else { const imgs = []; for (const r of m.results) { out.push({ role: "tool", tool_call_id: r.id, content: r.text || "(no text)" }); for (const d of r.images || []) imgs.push(d); } if (imgs.length) out.push({ role: "user", content: [{ type: "text", text: "Images returned by the tools above:" }, ...imgs.map((d) => ({ type: "image_url", image_url: { url: "data:image/png;base64," + d } }))] }); }
     }
     return out;
   }
   async function streamOpenAI(sink, signal, provider) {
-    const body = { model: app.config.model, stream: true, messages: toOpenAI(prepared()), tools: openaiTools, tool_choice: "auto" };
+    const body = { model: app.config.model, stream: true, messages: toOpenAI(prepared(), provider), tools: openaiTools, tool_choice: "auto" };
     const r = await postStream(provider, body, signal);
-    let text = "", stop = null; const calls = []; // index -> {id,name,args}
+    let text = "", stop = null; const calls = []; const reasoning = []; // calls: index -> {id,name,args,extra}
     await readSSE(r, (ev) => {
       const ch = ev.choices && ev.choices[0]; if (!ch) return;
       const d = ch.delta || {};
       if (d.content) { text += d.content; sink.onText(d.content); }
+      if (Array.isArray(d.reasoning_details)) reasoning.push(...d.reasoning_details);
       for (const tc of d.tool_calls || []) {
         const i = tc.index || 0; if (!calls[i]) { calls[i] = { id: tc.id || "call_" + i, name: "", args: "" }; }
         if (tc.id) calls[i].id = tc.id;
         if (tc.function && tc.function.name) { calls[i].name = tc.function.name; sink.toolStart(calls[i].id, calls[i].name); }
         if (tc.function && tc.function.arguments) calls[i].args += tc.function.arguments;
+        if (tc.extra_content) calls[i].extra = Object.assign(calls[i].extra || {}, tc.extra_content);
       }
       if (ch.finish_reason) stop = ch.finish_reason;
     });
-    const outCalls = calls.filter(Boolean).map((c) => { let input = {}; try { input = JSON.parse(c.args || "{}"); } catch (e) {} sink.toolLabel(c.id, c.name, input); return { id: c.id, name: c.name, input }; });
-    return { text, calls: outCalls, stop: stop === "tool_calls" || outCalls.length ? "tool" : stop === "length" ? "length" : "end" };
+    const outCalls = calls.filter(Boolean).map((c) => { let input = {}; try { input = JSON.parse(c.args || "{}"); } catch (e) {} sink.toolLabel(c.id, c.name, input); const o = { id: c.id, name: c.name, input }; if (c.extra) o.extra = c.extra; return o; });
+    return { text, calls: outCalls, reasoning, stop: stop === "tool_calls" || outCalls.length ? "tool" : stop === "length" ? "length" : "end" };
   }
-  async function send(text) {
+  async function send(text, opts = {}) {
     if (busy) return;
+    open(true);
     if (!app.hasBackend) { const d = addBot(); d.innerHTML = `<p class="err-msg">The assistant runs through the Trace Lab desktop app, which keeps your API key off the page. Open this page from TraceLab.exe.</p>`; return; }
     const prov = app.config.provider || "anthropic";
     if (!app.config.hasKey && prov !== "custom") { const d = addBot(); d.innerHTML = `<p>Add your ${app.esc(providerLabel())} API key in <button class="btn" data-act="settings">Settings</button> first.</p>`; scroll(); return; }
     if (!app.config.model) { const d = addBot(); d.innerHTML = `<p>Choose a model for ${app.esc(providerLabel())} in <button class="btn" data-act="settings">Settings</button> first.</p>`; scroll(); return; }
     if (!messages.length) log.innerHTML = "";
-    input.value = ""; input.style.height = "auto"; addUser(text);
+    if (!opts.keepInput) { input.value = ""; input.style.height = "auto"; } addUser(opts.display || text);
     const base = messages.length;
     messages.push({ role: "user", text: contextBlock() + "\n\n" + text });
-    setBusy(true); ctrl = new AbortController();
-    let bubble = addBot();
+    setBusy(true); ctrl = new AbortController(); curSignal = ctrl.signal;
+    let bubble = addBot(); curBubble = bubble;
+    const maxTurns = opts.guided || /guided|probe|measure/i.test(text) ? 60 : 24;
     try {
-      for (let turn = 0; turn < 16; turn++) {
-        const sink = makeSink(bubble);
-        const res = prov === "anthropic" ? await streamAnthropic(sink, ctrl.signal) : await streamOpenAI(sink, ctrl.signal, prov);
+      for (let turn = 0; turn < maxTurns; turn++) {
+        const sink = makeSink(bubble); const sig = ctrl.signal;
+        const res = await withRetry(() => (prov === "anthropic" ? streamAnthropic(sink, sig) : streamOpenAI(sink, sig, prov)), bubble, sig);
         sink.end();
-        messages.push({ role: "assistant", text: res.text, calls: res.calls });
+        messages.push({ role: "assistant", text: res.text, calls: res.calls, reasoning: res.reasoning });
         if (res.stop !== "tool") { if (res.stop === "length") appendNote(bubble, "Reply was cut off at the length limit. Ask it to continue."); break; }
         const results = [];
         for (const c of res.calls) {
@@ -371,7 +612,7 @@ export function initAssistant(app) {
           const n = toolToNeutral(out); results.push({ id: c.id, name: c.name, text: n.text, images: n.images });
         }
         messages.push({ role: "tool", results });
-        bubble = addBot();
+        bubble = addBot(); curBubble = bubble;
       }
     } catch (err) {
       if (err.name === "AbortError") appendNote(bubble, "Stopped.");
@@ -380,7 +621,8 @@ export function initAssistant(app) {
     } finally {
       bubble.querySelectorAll(".tool.run").forEach((c) => c.classList.remove("run"));
       if (!bubble.textContent.trim()) bubble.remove();
-      setBusy(false); ctrl = null; scroll();
+      setBusy(false); ctrl = null; curBubble = null; curSignal = null; scroll();
+      if (panel.hidden) { const dot = $("#aiDot"); if (dot) dot.hidden = false; }
     }
   }
   function appendNote(bubble, t) { const p = document.createElement("p"); p.className = "foot"; p.textContent = t; bubble.appendChild(p); }
@@ -435,9 +677,10 @@ export function initAssistant(app) {
   emptyState(); renderCtx();
   return {
     refresh() { if (!messages.length) emptyState(); renderCtx(); },
+    open, guideCard,
+    addContext(text) { open(true); input.value = (input.value ? input.value.trimEnd() + "\n" : "") + text + "\n"; input.dispatchEvent(new Event("input")); input.focus(); input.setSelectionRange(input.value.length, input.value.length); },
     askAboutSelection() {
-      const sel = S.sel; if (!sel) return;
-      const w = $("#work"); if (!w.classList.contains("ai")) $("#aiToggle").click();
+      const sel = S.sel; if (!sel) { open(true); return; }
       send(sel.type === "net" ? `Diagnose ${sel.name}: what creates it, what it feeds, and how to check it.` : sel.type === "part" ? `What does ${sel.name} do, and how do I test it?` : `Where is ${sel.name} used?`);
     },
     tools: T, md,

@@ -9,11 +9,23 @@ Windows 10/11 (64-bit).
 - Subnets: follows a rail through resistors, inductors, ferrites, fuses and jumpers.
 - Log diode-mode, voltage and resistance readings per net, and mark nets known-good or faulty.
   Readings persist in a local database and carry across boards.
-- Repair assistant: reads the board and schematic, views schematic pages, uses your readings
-  (including known-good values from other boards), and suggests diagnostic steps.
-  Works with Anthropic (Claude), OpenAI, Google Gemini, OpenRouter, or a local/custom
+- **Flux**, the repair assistant, in a floating chat bubble: reads the board and schematic, views
+  schematic pages, uses your readings (including known-good values from other boards), and suggests
+  diagnostic steps. Works with Anthropic (Claude), OpenAI, Google Gemini, OpenRouter, or a local/custom
   OpenAI-compatible server (Ollama, LM Studio, …). Pick the service and model in Settings.
-- Theme (system/light/dark) and accent colour in Settings.
+- **Guided diagnosis**: Flux asks you to probe one point at a time, highlights it on the board, switches
+  a connected meter to the right function, captures the reading when it's steady (or you type it),
+  saves it to the database and decides the next point from the result.
+- **Bench instruments** (Bench menu or the bar along the bottom): multimeters, bench power supplies and
+  oscilloscopes over USB serial (COM port), USB through VISA (NI-VISA / Keysight IO Libraries), or the
+  network (raw SCPI, port 5025). Click an instrument on the bench bar to show or hide its live readout.
+  Flux reads them live, looks at the supply's current history and grabs the scope's screen.
+  Supported: SCPI meters (Keysight 344xx, Siglent SDM, Rigol DM3000, GW Instek), Owon XDM, Fluke 287/289,
+  text-streaming meters; Rigol DP800, Siglent SPD, Korad/Tenma/Velleman and SCPI supplies; Rigol DS1000Z /
+  MSO5000 / DHO, Siglent SDS and Keysight InfiniiVision scopes; plus demo instruments to try it without
+  hardware. Trace Lab only reads the power supply; it never changes its output.
+- Opens empty and offers to reopen your last board and schematic; File → Open recent.
+- Theme (system/light/dark), accent colour and split direction in Settings.
 
 ## Encrypted boardviews and the FZ key
 
