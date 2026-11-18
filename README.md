@@ -36,7 +36,13 @@ Windows 10/11 (64-bit).
 - **Library** (File → Library, Ctrl+L): search your boardview and schematic folders; opening a boardview
   opens its matching schematic automatically (matched by model or board number in the file names).
 - Opens empty and offers to reopen your last board and schematic; File → Open recent.
-- Theme (system/light/dark), accent colour and split direction in Settings.
+- **Copper layers** for files that contain routing (KiCad, Eagle, Altium ASCII, GenCAD, and XZZ line layers):
+  traces, vias and copper pours by layer, with a Layers menu to show/hide and recolour each layer; the
+  selected net's traces light up on every layer, and clicking a trace selects its net. Repair boardview
+  formats (BRD, BDV, FZ, CAE, ASC, BVR, CST, IPC-D-356) store pins and nets only, so they show airwires.
+- Board size from the file's outline is shown next to the file name (mm and inches).
+- Themes (System, Dark, Light, Midnight, Graphite, OLED black, High contrast, Paper), accent colours, and
+  board colour schemes (solder-mask presets or your own colours) in File → Settings (Ctrl+,).
 
 ## Encrypted boardviews and the FZ key
 

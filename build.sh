@@ -21,8 +21,18 @@ if [ -n "$FZKEY" ] && [ "${#FZKEY}" -ne 352 ]; then
 fi
 if [ -z "$FZKEY" ]; then echo "warning: no FZ key set; encrypted .fz files won't open in this build" >&2; fi
 
+# Built-in CAE key, same rules: TRACELAB_CAE_KEY (GitHub Actions secret) or build/caekey.secret (gitignored).
+CAEKEY="${TRACELAB_CAE_KEY:-}"
+if [ -z "$CAEKEY" ] && [ -f build/caekey.secret ]; then CAEKEY="$(cat build/caekey.secret)"; fi
+CAEKEY="$(printf '%s' "$CAEKEY" | sed 's/0[xX]//g' | tr -cd '0-9a-fA-F')"
+if [ -n "$CAEKEY" ] && [ "${#CAEKEY}" -ne 352 ]; then
+  echo "warning: CAE key has ${#CAEKEY} hex digits, expected 352 (44 words); building without it" >&2
+  CAEKEY=""
+fi
+if [ -z "$CAEKEY" ]; then echo "warning: no CAE key set; encrypted .cae files will need a key in Settings" >&2; fi
+
 cp web/js/aichoice.js installer/wizard/aichoice.js # the setup wizard shares the model picker
-go build -trimpath -ldflags "-H windowsgui -s -w -X main.appVersion=${VERSION} -X main.defaultUpdateRepo=${REPO} -X main.builtinFZKeyHex=${FZKEY}" -o installer/payload/TraceLab.exe .
+go build -trimpath -ldflags "-H windowsgui -s -w -X main.appVersion=${VERSION} -X main.defaultUpdateRepo=${REPO} -X main.builtinFZKeyHex=${FZKEY} -X main.builtinCAEKeyHex=${CAEKEY}" -o installer/payload/TraceLab.exe .
 go build -trimpath -ldflags "-H windowsgui -s -w -X main.appVersion=${VERSION}" -o "dist/TraceLab-Setup-${VERSION}.exe" ./installer
 cp installer/payload/TraceLab.exe "dist/TraceLab-${VERSION}-portable.exe"
 ( cd dist && sha256sum "TraceLab-Setup-${VERSION}.exe" > "TraceLab-Setup-${VERSION}.exe.sha256" )

@@ -73,13 +73,21 @@ func registerLocalAIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/localai", func(w http.ResponseWriter, r *http.Request) {
 		cfgMu.Lock()
 		localAI.Dir = modelsDir()
+		localAI.ExtraDirs = append([]string(nil), cfg.ModelDirs...)
 		sel, eng := cfg.LocalModel, cfg.LocalEngine
 		cfgMu.Unlock()
+		if r.URL.Query().Get("rescan") == "1" {
+			localai.ForgetScan()
+		}
 		models, engines := localAI.Installed()
+		var known []string
+		for _, d := range localai.KnownModelDirs() {
+			known = append(known, d.Source+": "+d.Dir)
+		}
 		writeJSON(w, 200, map[string]any{
 			"advice": localai.Advise(hardware()), "sizes": modelSizes(), "installed": models, "engines_installed": engines,
 			"progress": localAI.Progress(), "server": localAI.Status(), "dir": localAI.Dir, "free": osutil.FreeSpace(localAI.Dir),
-			"selected": sel, "engine": eng,
+			"selected": sel, "engine": eng, "external": localai.ScanExternal(localAI.ExtraDirs), "model_dirs": localAI.ExtraDirs, "known_dirs": known,
 		})
 	})
 
@@ -117,8 +125,12 @@ func registerLocalAIRoutes(mux *http.ServeMux) {
 	// use makes an installed model the assistant's AI service.
 	mux.HandleFunc("/api/localai/use", func(w http.ResponseWriter, r *http.Request) {
 		var q struct{ Model, Engine string }
-		if r.Method != http.MethodPost || readJSON(r, &q) != nil || localai.ModelByID(q.Model) == nil {
+		if r.Method != http.MethodPost || readJSON(r, &q) != nil || (localai.ModelByID(q.Model) == nil && !strings.HasPrefix(q.Model, "ext:")) {
 			apiErr(w, 400, "Choose a model.")
+			return
+		}
+		if _, ok := localAI.ModelInstalled(q.Model); !ok && strings.HasPrefix(q.Model, "ext:") {
+			apiErr(w, 404, "That model file isn't there any more.")
 			return
 		}
 		cfgMu.Lock()
@@ -192,6 +204,43 @@ func registerLocalAIRoutes(mux *http.ServeMux) {
 		_ = saveConfig()
 		cfgMu.Unlock()
 		writeJSON(w, 200, map[string]any{"dir": localAI.Dir, "free": osutil.FreeSpace(localAI.Dir)})
+	})
+
+	// folders adds or removes a folder Trace Lab searches for GGUF model files.
+	mux.HandleFunc("/api/localai/folders", func(w http.ResponseWriter, r *http.Request) {
+		var q struct{ Add, Remove string }
+		if r.Method != http.MethodPost || readJSON(r, &q) != nil {
+			apiErr(w, 400, "Choose a folder.")
+			return
+		}
+		cfgMu.Lock()
+		defer cfgMu.Unlock()
+		if d := strings.TrimSpace(q.Add); d != "" {
+			if st, err := os.Stat(d); err != nil || !st.IsDir() {
+				apiErr(w, 400, "That folder doesn't exist: "+d)
+				return
+			}
+			dup := false
+			for _, x := range cfg.ModelDirs {
+				dup = dup || strings.EqualFold(filepath.Clean(x), filepath.Clean(d))
+			}
+			if !dup {
+				cfg.ModelDirs = append(cfg.ModelDirs, d)
+			}
+		}
+		if d := strings.TrimSpace(q.Remove); d != "" {
+			var keep []string
+			for _, x := range cfg.ModelDirs {
+				if !strings.EqualFold(x, d) {
+					keep = append(keep, x)
+				}
+			}
+			cfg.ModelDirs = keep
+		}
+		_ = saveConfig()
+		localAI.ExtraDirs = append([]string(nil), cfg.ModelDirs...)
+		localai.ForgetScan()
+		writeJSON(w, 200, map[string]any{"model_dirs": cfg.ModelDirs, "external": localai.ScanExternal(cfg.ModelDirs)})
 	})
 
 	mux.HandleFunc("/api/localai/reveal", func(w http.ResponseWriter, r *http.Request) {

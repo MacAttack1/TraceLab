@@ -352,7 +352,7 @@ export function initAssistant(app) {
       : sel.type === "part" ? [`What does ${sel.name} do?`, `How do I test ${sel.name}?`, `What powers ${sel.name}?`] : [`Where is ${sel.name} used?`];
     quick.innerHTML = busy ? "" : qs.map((t) => `<button type="button">${app.esc(t)}</button>`).join("");
     const mdl = (app.config.model || "").replace(/^claude-/, "").replace(/-(\d)-(\d)$/, " $1.$2").replace(/^.*\//, "");
-    $("#aiModel").textContent = mdl;
+    if (app.refreshModelPicker) app.refreshModelPicker(); else $("#aiModelSel").innerHTML = `<option>${app.esc(mdl)}</option>`;
   }
   quick.addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) send(b.textContent); });
   let boardId = null;
@@ -384,7 +384,7 @@ export function initAssistant(app) {
   (() => { // drag the panel by its header; remember where it was left
     const head = $("#aiHead"); let d = null;
     try { const p = JSON.parse(localStorage.getItem("tl.fluxpos") || "null"); if (p) { panel.style.right = p.r + "px"; panel.style.bottom = p.b + "px"; } } catch (e) {}
-    head.addEventListener("pointerdown", (e) => { if (e.target.closest("button")) return; const r = panel.getBoundingClientRect(); d = { x: e.clientX, y: e.clientY, r: window.innerWidth - r.right, b: window.innerHeight - r.bottom }; head.setPointerCapture(e.pointerId); });
+    head.addEventListener("pointerdown", (e) => { if (e.target.closest("button,select")) return; const r = panel.getBoundingClientRect(); d = { x: e.clientX, y: e.clientY, r: window.innerWidth - r.right, b: window.innerHeight - r.bottom }; head.setPointerCapture(e.pointerId); });
     head.addEventListener("pointermove", (e) => { if (!d) return; const r = Math.max(0, Math.min(window.innerWidth - 200, d.r - (e.clientX - d.x))), bb = Math.max(0, Math.min(window.innerHeight - 120, d.b - (e.clientY - d.y))); panel.style.right = r + "px"; panel.style.bottom = bb + "px"; });
     head.addEventListener("pointerup", () => { if (!d) return; d = null; try { localStorage.setItem("tl.fluxpos", JSON.stringify({ r: parseInt(panel.style.right) || 18, b: parseInt(panel.style.bottom) || 58 })); } catch (e) {} });
     head.addEventListener("dblclick", (e) => { if (e.target.closest("button")) return; panel.style.right = ""; panel.style.bottom = ""; panel.style.width = ""; panel.style.height = ""; try { localStorage.removeItem("tl.fluxpos"); } catch (x) {} });
@@ -425,7 +425,7 @@ export function initAssistant(app) {
   function addUser(text) { const d = document.createElement("div"); d.className = "msg user"; d.textContent = text; log.appendChild(d); scroll(); }
   function addBot() { const d = document.createElement("div"); d.className = "msg bot"; log.appendChild(d); return d; }
   function scroll() { log.scrollTop = log.scrollHeight; }
-  function setBusy(v) { busy = v; sendBtn.textContent = v ? "Stop" : "Send"; renderCtx(); }
+  function setBusy(v) { busy = v; sendBtn.textContent = v ? "Stop" : "Send"; $("#aiModelSel").disabled = v; renderCtx(); }
 
   /* ---------------- API loop (provider-agnostic) ----------------
      History is kept in a neutral form and converted to each service's wire format at send time:

@@ -24,8 +24,11 @@ var aiClient = &http.Client{Transport: &http.Transport{
 	ResponseHeaderTimeout: 180 * time.Second,
 }}
 
-func builtinFZKeyWords() string {
-	h := strings.TrimSpace(builtinFZKeyHex)
+func builtinFZKeyWords() string { return keyWords(builtinFZKeyHex) }
+
+// keyWords turns a 352-hex-digit build secret into the "0x… 0x…" word list the parsers take.
+func keyWords(hexKey string) string {
+	h := strings.TrimSpace(hexKey)
 	if len(h) != 352 {
 		return ""
 	}

@@ -29,12 +29,15 @@ const appName = "Trace Lab"
 const appID = "TraceLab" // folder, registry and user-agent name
 
 // Set at build time: -ldflags "-X main.appVersion=1.2.0 -X main.defaultUpdateRepo=owner/repo -X main.builtinFZKeyHex=<352 hex chars>"
-var appVersion = "1.5.1"
+var appVersion = "1.6.1"
 var defaultUpdateRepo = ""
 
 // builtinFZKeyHex is the ASUS FZ RC6 key as 44 concatenated 8-hex-digit words (352 chars), injected
 // at build time from a secret so it never lives in the source tree. Empty in a plain build.
 var builtinFZKeyHex = ""
+
+// builtinCAEKeyHex is the CAE RC6 key, injected the same way (TRACELAB_CAE_KEY / build/caekey.secret).
+var builtinCAEKeyHex = ""
 var justUpdated bool
 
 type Config struct {
@@ -49,6 +52,8 @@ type Config struct {
 	ThemeMode string `json:"theme_mode"` // system|light|dark
 	Accent    string `json:"accent"`     // copper|amber|blue|green|violet|rose|teal
 	SplitDir  string `json:"split_dir"`  // side|stack
+	// Board view colours: {"preset": "green", "custom": {"fill": "#123456", …}}
+	BoardColors json.RawMessage `json:"board_colors,omitempty"`
 	// Readings database location: local (AppData) | onedrive | custom folder (e.g. Google Drive, Dropbox)
 	ReadingsMode string `json:"readings_mode"`
 	ReadingsDir  string `json:"readings_dir"`
@@ -64,9 +69,10 @@ type Config struct {
 	SchematicsDir string `json:"schematics_dir"`
 	AutoSchematic *bool  `json:"auto_schematic"`
 	// Offline AI: model and engine build run by the built-in llama.cpp server
-	LocalModel  string `json:"local_model"`
-	LocalEngine string `json:"local_engine"`
-	ModelsDir   string `json:"models_dir"`
+	LocalModel  string   `json:"local_model"`
+	LocalEngine string   `json:"local_engine"`
+	ModelsDir   string   `json:"models_dir"`
+	ModelDirs   []string `json:"model_dirs,omitempty"` // extra folders with GGUF models (LM Studio and Ollama are found by themselves)
 }
 
 const defaultModelAnthropic = "claude-sonnet-5-5"
@@ -190,7 +196,8 @@ func publicConfig() map[string]any {
 		"provider": prov, "model": cfg.Model, "base_url": cfg.BaseURL, "hasKey": providerKey(prov) != "", "keyProviders": keyset,
 		"xzz_key": cfg.XZZKey, "cae_key": cfg.CAEKey, "theme_mode": mode, "accent": accent, "split_dir": cfg.SplitDir,
 		"readings": storageInfo(), "readings_dir": cfg.ReadingsDir, "tutorial_done": cfg.TutorialDone,
-		"boards_dir": cfg.BoardsDir, "schematics_dir": cfg.SchematicsDir, "auto_schematic": cfg.AutoSchematic == nil || *cfg.AutoSchematic,
+		"board_colors": cfg.BoardColors,
+		"boards_dir":   cfg.BoardsDir, "schematics_dir": cfg.SchematicsDir, "auto_schematic": cfg.AutoSchematic == nil || *cfg.AutoSchematic,
 		"local_model": cfg.LocalModel, "local_engine": cfg.LocalEngine, "models_dir": modelsDir(),
 		"version": appVersion, "update_repo": effectiveRepo(), "default_repo": defaultUpdateRepo, "hasGitHubToken": cfg.GitHubToken != "",
 		"auto_update": auto, "just_updated": justUpdated, "can_self_update": canSelfUpdate,
@@ -316,26 +323,27 @@ func newServer(addr string) http.Handler {
 		defer cfgMu.Unlock()
 		if r.Method == http.MethodPost {
 			var in struct {
-				APIKey    *string `json:"api_key"`
-				ClearKey  bool    `json:"clear_key"`
-				Model     *string `json:"model"`
-				XZZKey    *string `json:"xzz_key"`
-				CAEKey    *string `json:"cae_key"`
-				Provider  *string `json:"provider"`
-				BaseURL   *string `json:"base_url"`
-				ThemeMode *string `json:"theme_mode"`
-				SplitDir  *string `json:"split_dir"`
-				RMode     *string `json:"readings_mode"`
-				RDir      *string `json:"readings_dir"`
-				Tutorial  *bool   `json:"tutorial_done"`
-				Accent    *string `json:"accent"`
-				Repo      *string `json:"update_repo"`
-				GHToken   *string `json:"github_token"`
-				ClearGH   bool    `json:"clear_github_token"`
-				Auto      *bool   `json:"auto_update"`
-				BoardsDir *string `json:"boards_dir"`
-				SchDir    *string `json:"schematics_dir"`
-				AutoSch   *bool   `json:"auto_schematic"`
+				APIKey    *string         `json:"api_key"`
+				ClearKey  bool            `json:"clear_key"`
+				Model     *string         `json:"model"`
+				XZZKey    *string         `json:"xzz_key"`
+				CAEKey    *string         `json:"cae_key"`
+				Provider  *string         `json:"provider"`
+				BaseURL   *string         `json:"base_url"`
+				ThemeMode *string         `json:"theme_mode"`
+				SplitDir  *string         `json:"split_dir"`
+				RMode     *string         `json:"readings_mode"`
+				RDir      *string         `json:"readings_dir"`
+				Tutorial  *bool           `json:"tutorial_done"`
+				Accent    *string         `json:"accent"`
+				Repo      *string         `json:"update_repo"`
+				GHToken   *string         `json:"github_token"`
+				ClearGH   bool            `json:"clear_github_token"`
+				Auto      *bool           `json:"auto_update"`
+				BoardsDir *string         `json:"boards_dir"`
+				SchDir    *string         `json:"schematics_dir"`
+				AutoSch   *bool           `json:"auto_schematic"`
+				BoardCols json.RawMessage `json:"board_colors"`
 			}
 			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
 				apiErr(w, 400, "Settings couldn't be read.")
@@ -431,6 +439,12 @@ func newServer(addr string) http.Handler {
 				}
 				*f.dst = d
 			}
+			if len(in.BoardCols) > 0 && len(in.BoardCols) < 4096 {
+				var chk map[string]any
+				if json.Unmarshal(in.BoardCols, &chk) == nil {
+					cfg.BoardColors = in.BoardCols
+				}
+			}
 			if in.AutoSch != nil {
 				v := *in.AutoSch
 				cfg.AutoSchematic = &v
@@ -511,7 +525,7 @@ func newServer(addr string) http.Handler {
 
 	// Built-in decode keys served to the page at runtime (injected at build time, never in the repo).
 	mux.HandleFunc("/api/keys", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"fz": builtinFZKeyWords()})
+		writeJSON(w, 200, map[string]any{"fz": builtinFZKeyWords(), "cae": keyWords(builtinCAEKeyHex)})
 	})
 
 	registerAIProxy(mux)

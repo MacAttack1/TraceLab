@@ -36,6 +36,7 @@ jobs:
       - name: Build app and installer
         env:
           TRACELAB_FZ_KEY: ${{ secrets.TRACELAB_FZ_KEY }}
+          TRACELAB_CAE_KEY: ${{ secrets.TRACELAB_CAE_KEY }}
         run: bash build.sh "$VERSION" "$GITHUB_REPOSITORY"
 
       - name: Upload build

@@ -1,7 +1,11 @@
 // Trace Lab boardview parsers.
 // Every parser returns a common model in mils (0.001"):
 //   { format, outline:[[[x,y],...], ...] (polygons), segments:[[x1,y1,x2,y2]...] (fallback),
-//     parts:[{name, side:'T'|'B'|'BOTH', desc?}], pins:[{x,y,part,net,num,name?,r?,side?}] }
+//     parts:[{name, side:'T'|'B'|'BOTH', desc?}], pins:[{x,y,part,net,num,name?,r?,side?}],
+//     copper (design-tool formats only: KiCad, Eagle, Altium ASCII, GenCAD, XZZ line layers):
+//     layers:[{id,name,side:'T'|'B'|'I'}] top→bottom, traces:[{x1,y1,x2,y2,w,layer,net}],
+//     vias:[{x,y,r,net}], zones:[{layer,net,poly:[[x,y]…]}] }
+// Repair boardview formats (BRD, BDV, FZ, CAE, ASC, BVR, CST, IPC-D-356…) carry no copper routing.
 // Logic for the repair-tool formats follows the OpenBoardView reference implementations (MIT).
 
 export const FORMATS = [
@@ -93,7 +97,17 @@ function finish(m, fname, format) {
   pins.forEach((p, i) => outParts[p.part].pins.push(i));
   let outline = (m.outline || []).filter((poly) => poly && poly.length > 2);
   if (!outline.length && m.segments && m.segments.length) outline = chainSegments(m.segments);
-  return { name: fname, format, parts: outParts, pins, outline, desc: m.desc || "" };
+  const out = { name: fname, format, parts: outParts, pins, outline, desc: m.desc || "" };
+  if (m.traces && m.traces.length) {
+    const clean = (n) => { n = String(n || "").trim(); return NC_RE.test(n) ? "" : n; };
+    out.traces = m.traces.filter((t) => isFinite(t.x1) && isFinite(t.y1) && isFinite(t.x2) && isFinite(t.y2)).map((t) => ({ ...t, net: clean(t.net) }));
+    out.vias = (m.vias || []).filter((v) => isFinite(v.x) && isFinite(v.y)).map((v) => ({ ...v, net: clean(v.net) }));
+    out.zones = (m.zones || []).filter((z) => z.poly && z.poly.length > 2).map((z) => ({ ...z, net: clean(z.net) }));
+    const used = new Set([...out.traces.map((t) => t.layer), ...out.zones.map((z) => z.layer)]);
+    out.layers = (m.layers || []).filter((l) => used.has(l.id));
+    for (const id of used) if (!out.layers.some((l) => l.id === id)) out.layers.push({ id, name: String(id), side: "I" });
+  }
+  return out;
 }
 
 export function chainSegments(segs) {
@@ -126,6 +140,17 @@ export function chainSegments(segs) {
   return polys.slice(0, 40);
 }
 function bboxArea(p) { let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity; p.forEach(([x, y]) => { a = Math.min(a, x); b = Math.min(b, y); c = Math.max(c, x); d = Math.max(d, y); }); return (c - a) * (d - b); }
+// Arc through three points (start, mid, end) as short segments.
+function arc3(a, m, b, steps = 12) {
+  const [x1, y1] = a, [x2, y2] = m, [x3, y3] = b; const d = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2));
+  if (Math.abs(d) < 1e-9) return [[x1, y1, x3, y3]];
+  const ux = ((x1 * x1 + y1 * y1) * (y2 - y3) + (x2 * x2 + y2 * y2) * (y3 - y1) + (x3 * x3 + y3 * y3) * (y1 - y2)) / d;
+  const uy = ((x1 * x1 + y1 * y1) * (x3 - x2) + (x2 * x2 + y2 * y2) * (x1 - x3) + (x3 * x3 + y3 * y3) * (x2 - x1)) / d;
+  const r = Math.hypot(x1 - ux, y1 - uy); let a0 = Math.atan2(y1 - uy, x1 - ux), am = Math.atan2(y2 - uy, x2 - ux), a1 = Math.atan2(y3 - uy, x3 - ux);
+  const norm = (v) => ((v % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  let s1 = norm(a1 - a0); const sm = norm(am - a0); if (sm > s1) s1 -= 2 * Math.PI; // go the way that passes the mid point
+  return arcSegs(ux, uy, r, a0, a0 + s1, steps);
+}
 function arcSegs(cx, cy, r, a0, a1, steps = 16) {
   const out = []; let px = cx + r * Math.cos(a0), py = cy + r * Math.sin(a0);
   for (let i = 1; i <= steps; i++) { const a = a0 + (a1 - a0) * i / steps; const x = cx + r * Math.cos(a), y = cy + r * Math.sin(a); out.push([px, py, x, y]); px = x; py = y; }
@@ -445,13 +470,16 @@ function parseXZZ(u8in, keyStr) {
   { let p = netStart + 4; const end = netStart + 4 + netSize; while (p < end) { const sz = u32(p), idx = u32(p + 4); nets.set(idx, latin1.decode(b.subarray(p + 8, p + sz))); p += sz; } }
   const k8 = parseHexKey64(keyStr);
   let des = null;
-  const parts = [], pins = [], segs = [];
+  const parts = [], pins = [], segs = [], xTraces = [];
   let p = mainStart + 4; const end = mainStart + 4 + mainSize;
   const S = 10000;
   while (p < end) {
     const type = b[p]; p += 1; const size = u32(p); p += 4; const blk = b.subarray(p, p + size); p += size;
     const bv = new DataView(blk.buffer, blk.byteOffset, blk.byteLength); const r = (o) => bv.getUint32(o, true);
-    if (type === 0x05 && size >= 24) { if (r(0) === 28) segs.push([r(4) / S, r(8) / S, r(12) / S, r(16) / S]); }
+    if (type === 0x05 && size >= 24) {
+      if (r(0) === 28) segs.push([r(4) / S, r(8) / S, r(12) / S, r(16) / S]);
+      else { const w = r(20) / S; xTraces.push({ x1: r(4) / S, y1: r(8) / S, x2: r(12) / S, y2: r(16) / S, w: w > 0 && w < 400 ? w : 6, layer: r(0), ni: size >= 28 ? r(24) : -1 }); }
+    }
     else if (type === 0x01 && size >= 28) {
       if (r(0) !== 28) continue;
       let a0 = r(16) / S, a1 = r(20) / S; if (a0 > a1) [a0, a1] = [a1, a0]; if (a1 - a0 > 180) a0 += 360;
@@ -484,8 +512,12 @@ function parseXZZ(u8in, keyStr) {
     }
   }
   let mx = Infinity, my = Infinity; segs.forEach((s) => { mx = Math.min(mx, s[0], s[2]); my = Math.min(my, s[1], s[3]); });
-  if (isFinite(mx)) { segs.forEach((s) => { s[0] -= mx; s[2] -= mx; s[1] -= my; s[3] -= my; }); pins.forEach((q) => { q.x -= mx; q.y -= my; }); }
-  return { parts, pins, segments: segs };
+  if (isFinite(mx)) { segs.forEach((s) => { s[0] -= mx; s[2] -= mx; s[1] -= my; s[3] -= my; }); pins.forEach((q) => { q.x -= mx; q.y -= my; }); xTraces.forEach((t) => { t.x1 -= mx; t.x2 -= mx; t.y1 -= my; t.y2 -= my; }); }
+  // XZZ keeps other line work (copper, silkscreen) as numbered layers; offer each as a layer to show or hide
+  const traces = xTraces.map((t) => ({ x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2, w: t.w, layer: t.layer, net: t.ni >= 0 ? nets.get(t.ni) || "" : "" }));
+  const ids = [...new Set(traces.map((t) => t.layer))].sort((a, b) => a - b);
+  const layers = ids.map((l, i) => ({ id: l, name: "Layer " + l, side: i === 0 ? "T" : i === ids.length - 1 && ids.length > 1 ? "B" : "I" }));
+  return { parts, pins, segments: segs, traces, layers };
 }
 
 /* ---------- DES (FIPS 46-3), bit-array implementation ---------- */
@@ -545,6 +577,7 @@ function parseGenCAD(t) {
   let sec = "", conv = (v) => v * 1000; // default INCH
   const segs = [], padstacks = new Map(), shapes = new Map(), comps = [], devices = new Map(), signals = new Map();
   let curPS = null, curShape = null, curComp = null, curDev = null, curSig = null;
+  const trackW = new Map(), gTraces = [], gVias = [], rLayers = []; let rNet = "", rW = 8, rLayer = "";
   for (const raw of lines(t)) {
     const l = raw.trim(); if (!l) continue;
     if (l[0] === "$") { sec = l.toUpperCase(); curPS = curShape = curComp = curDev = curSig = null; continue; }
@@ -578,6 +611,16 @@ function parseGenCAD(t) {
       else if (curDev && kw === "PART") curDev.part = k.slice(1).join(" ");
       else if (curDev && kw === "VALUE") curDev.value = k.slice(1).join(" ");
       else if (curDev && kw === "DESC") curDev.desc = k.slice(1).join(" ");
+    } else if (sec === "$TRACKS") {
+      if (kw === "TRACK" && k.length >= 3) trackW.set(k[1], conv(+k[2]));
+    } else if (sec === "$ROUTES") {
+      const v = k.slice(1).map(Number).map(conv);
+      if (kw === "ROUTE") { rNet = l.replace(/^ROUTE\s+/i, "").replace(/^"|"$/g, "").trim(); }
+      else if (kw === "TRACK") rW = trackW.has(k[1]) ? trackW.get(k[1]) : conv(+k[1]) || 8;
+      else if (kw === "LAYER") { rLayer = (k[1] || "").toUpperCase(); if (!rLayers.includes(rLayer)) rLayers.push(rLayer); }
+      else if (kw === "LINE" && v.length >= 4 && rLayer) gTraces.push({ x1: v[0], y1: v[1], x2: v[2], y2: v[3], w: rW, layer: rLayer, net: rNet });
+      else if (kw === "ARC" && v.length >= 6 && rLayer) { const [x1, y1, x2, y2, cx, cy] = v; const r = Math.hypot(x1 - cx, y1 - cy); let a0 = Math.atan2(y1 - cy, x1 - cx), a1 = Math.atan2(y2 - cy, x2 - cx); if (a1 <= a0) a1 += Math.PI * 2; arcSegs(cx, cy, r, a0, a1, 10).forEach(([a, b, c, d]) => gTraces.push({ x1: a, y1: b, x2: c, y2: d, w: rW, layer: rLayer, net: rNet })); }
+      else if (kw === "VIA" && k.length >= 4) { const ps = padstacks.get(k[1]); gVias.push({ x: conv(+k[2]), y: conv(+k[3]), r: ps && ps.drill ? conv(ps.drill) : 10, net: rNet }); }
     } else if (sec === "$SIGNALS") {
       if (kw === "SIGNAL") curSig = l.replace(/^SIGNAL\s+/i, "").replace(/^"|"$/g, "").trim();
       else if (kw === "NODE" && curSig !== null) signals.set(k[1] + "\u0000" + k[2], curSig);
@@ -601,12 +644,15 @@ function parseGenCAD(t) {
       pins.push({ part: pi, num: p.name, x, y, net: signals.get(c.name + "\u0000" + p.name) || "", side: side === "BOTH" ? "BOTH" : undefined });
     }
   }
-  return { parts, pins, segments: segs };
+  const lo = (l) => (l === "TOP" ? -1 : l === "BOTTOM" ? 999 : +(l.match(/\d+/) || [500])[0]);
+  const layers = rLayers.slice().sort((a, b) => lo(a) - lo(b)).map((l) => ({ id: l, name: l[0] + l.slice(1).toLowerCase(), side: l === "TOP" ? "T" : l === "BOTTOM" ? "B" : "I" }));
+  return { parts, pins, segments: segs, traces: gTraces, vias: gVias, layers };
 }
 
 /* ============================================================ Altium ASCII */
+const CU_ALT = /^(TOP|BOTTOM|MID\d+)$/;
 function parseAltium(t) {
-  const nets = new Map(), comps = new Map(), pads = [], segs = [];
+  const nets = new Map(), comps = new Map(), pads = [], segs = [], cu = [], vs = [];
   for (const l of lines(t)) {
     if (!l.includes("|RECORD=")) continue;
     const kv = {}; l.split("|").forEach((s) => { const i = s.indexOf("="); if (i > 0) kv[s.slice(0, i).toUpperCase()] = s.slice(i + 1); });
@@ -618,6 +664,9 @@ function parseAltium(t) {
       pads.push({ comp: +kv.COMPONENT, netId: kv.NET !== undefined ? +kv.NET : null, num: kv.NAME || "", x: num(kv.X), y: num(kv.Y), r: xs > 0 && ys > 0 ? Math.min(xs, ys) / 2 : undefined, th: kv.LAYER === "MULTILAYER" });
     }
     else if ((rec === "Track") && kv.LAYER === "KEEPOUT") segs.push([num(kv.X1), num(kv.Y1), num(kv.X2), num(kv.Y2)]);
+    else if (rec === "Track" && CU_ALT.test(kv.LAYER || "")) cu.push({ x1: num(kv.X1), y1: num(kv.Y1), x2: num(kv.X2), y2: num(kv.Y2), w: num(kv.WIDTH) || 8, layer: kv.LAYER, netId: kv.NET !== undefined ? +kv.NET : null });
+    else if (rec === "Arc" && CU_ALT.test(kv.LAYER || "")) { const cx = num(kv["LOCATION.X"]), cy = num(kv["LOCATION.Y"]), r = num(kv.RADIUS); let a0 = num(kv.STARTANGLE) * Math.PI / 180, a1 = num(kv.ENDANGLE) * Math.PI / 180; if (a1 <= a0) a1 += Math.PI * 2; arcSegs(cx, cy, r, a0, a1, 10).forEach(([x1, y1, x2, y2]) => cu.push({ x1, y1, x2, y2, w: num(kv.WIDTH) || 8, layer: kv.LAYER, netId: kv.NET !== undefined ? +kv.NET : null })); }
+    else if (rec === "Via" && kv.X !== undefined) vs.push({ x: num(kv.X), y: num(kv.Y), r: (num(kv.DIAMETER) || 20) / 2, netId: kv.NET !== undefined ? +kv.NET : null });
     else if (rec === "Arc" && kv.LAYER === "KEEPOUT") { const cx = num(kv["LOCATION.X"]), cy = num(kv["LOCATION.Y"]), r = num(kv.RADIUS); let a0 = num(kv.STARTANGLE) * Math.PI / 180, a1 = num(kv.ENDANGLE) * Math.PI / 180; if (a1 <= a0) a1 += Math.PI * 2; segs.push(...arcSegs(cx, cy, r, a0, a1)); }
   }
   // NET ids are resolved after all records are read, so redo the lookups
@@ -625,7 +674,12 @@ function parseAltium(t) {
   for (const [id, c] of comps) { idx.set(id, parts.length); parts.push(c); }
   const pins = [];
   for (const p of pads) { const pi = idx.get(p.comp); if (pi === undefined) continue; if (p.th) parts[pi].side = "BOTH"; pins.push({ part: pi, num: p.num, x: p.x, y: p.y, r: p.r, net: p.netId === null ? "" : nets.get(p.netId) || "" }); }
-  return { parts, pins, segments: segs };
+  const nn = (id) => (id === null ? "" : nets.get(id) || "");
+  const traces = cu.map((t) => ({ x1: t.x1, y1: t.y1, x2: t.x2, y2: t.y2, w: t.w, layer: t.layer, net: nn(t.netId) }));
+  const vias = vs.map((v) => ({ x: v.x, y: v.y, r: v.r, net: nn(v.netId) }));
+  const ids = [...new Set(traces.map((t) => t.layer))].sort((a, b) => (a === "TOP" ? -1 : a === "BOTTOM" ? 999 : +a.slice(3)) - (b === "TOP" ? -1 : b === "BOTTOM" ? 999 : +b.slice(3)));
+  const layers = ids.map((l) => ({ id: l, name: l === "TOP" ? "Top" : l === "BOTTOM" ? "Bottom" : "Mid " + l.slice(3), side: l === "TOP" ? "T" : l === "BOTTOM" ? "B" : "I" }));
+  return { parts, pins, segments: segs, traces, vias, layers };
 }
 
 /* ============================================================ KiCad (.kicad_pcb) */
@@ -679,7 +733,28 @@ function parseKiCad(t) {
     else if (g[0] === "gr_circle") { const c = P(kid(g, "center")), e = P(kid(g, "end")); segs.push(...arcSegs(c[0], c[1], Math.hypot(e[0] - c[0], e[1] - c[1]), 0, Math.PI * 2, 24)); }
     else if (g[0] === "gr_poly") { const pts = kid(g, "pts"); if (pts) { const xy = kids(pts, "xy").map(P); for (let i = 0; i < xy.length; i++) { const a = xy[i], b = xy[(i + 1) % xy.length]; segs.push([a[0], a[1], b[0], b[1]]); } } }
   }
-  return { parts, pins, segments: segs };
+  // copper: tracks, arcs, vias and filled zones
+  const netOf = (g) => { const nn = kid(g, "net"); return nn ? (nn.length >= 3 ? nn[2] : (nets.get(nn[1]) || nn[1])) : ""; };
+  const traces = [], vias = [], zones = [], seen = new Set();
+  const isCu = (l) => /\.Cu$/.test(l || "");
+  const add = (l) => { if (isCu(l)) seen.add(l); return l; };
+  for (const g of root) {
+    if (!Array.isArray(g)) continue;
+    if (g[0] === "segment" || g[0] === "arc") {
+      const l = (kid(g, "layer") || [])[1]; if (!isCu(l)) continue; add(l);
+      const w = +((kid(g, "width") || [])[1] || 0.2) * MIL, net = netOf(g);
+      const ss = g[0] === "segment" ? [[...P(kid(g, "start")), ...P(kid(g, "end"))]] : arc3(P(kid(g, "start")), P(kid(g, "mid")), P(kid(g, "end")));
+      ss.forEach(([x1, y1, x2, y2]) => traces.push({ x1, y1, x2, y2, w, layer: l, net }));
+    } else if (g[0] === "via") {
+      const at = kid(g, "at"); if (!at) continue; vias.push({ x: +at[1] * MIL, y: -at[2] * MIL, r: +((kid(g, "size") || [])[1] || 0.6) * MIL / 2, net: netOf(g) });
+    } else if (g[0] === "zone") {
+      const net = ((kid(g, "net_name") || [])[1]) || netOf(g);
+      for (const fp of kids(g, "filled_polygon")) { const l = (kid(fp, "layer") || kid(g, "layer") || [])[1]; const pts = kid(fp, "pts"); if (!isCu(l) || !pts) continue; add(l); zones.push({ layer: l, net, poly: kids(pts, "xy").map(P) }); }
+    }
+  }
+  const order = (l) => l === "F.Cu" ? -1 : l === "B.Cu" ? 999 : +(l.match(/In(\d+)/) || [0, 500])[1];
+  const layers = [...seen].sort((a, b) => order(a) - order(b)).map((l) => ({ id: l, name: l === "F.Cu" ? "Top (F.Cu)" : l === "B.Cu" ? "Bottom (B.Cu)" : l.replace(".Cu", ""), side: l === "F.Cu" ? "T" : l === "B.Cu" ? "B" : "I" }));
+  return { parts, pins, segments: segs, traces, vias, zones, layers };
 }
 
 /* ============================================================ Eagle XML (.brd) */
@@ -710,7 +785,26 @@ function parseEagle(t) {
     });
   });
   doc.querySelectorAll("plain > wire[layer='20']").forEach((w) => segs.push(["x1", "y1", "x2", "y2"].map((a) => +w.getAttribute(a) * MIL)));
-  return { parts, pins, segments: segs };
+  // copper: signal wires on layers 1 (top) … 16 (bottom), vias, polygon pours (outline as drawn)
+  const lname = new Map(); doc.querySelectorAll("layers > layer").forEach((l) => lname.set(+l.getAttribute("number"), l.getAttribute("name")));
+  const traces = [], vias = [], zones = [], seen = new Set();
+  doc.querySelectorAll("signals > signal").forEach((sg) => {
+    const net = sg.getAttribute("name");
+    sg.querySelectorAll("wire").forEach((w) => {
+      const l = +w.getAttribute("layer"); if (!(l >= 1 && l <= 16)) return; seen.add(l);
+      const x1 = +w.getAttribute("x1") * MIL, y1 = +w.getAttribute("y1") * MIL, x2 = +w.getAttribute("x2") * MIL, y2 = +w.getAttribute("y2") * MIL, wd = (+w.getAttribute("width") || 0.15) * MIL;
+      const curve = +w.getAttribute("curve") || 0;
+      if (curve) { // arc: chord + included angle
+        const c = curve * Math.PI / 180, dx = x2 - x1, dy = y2 - y1, ch = Math.hypot(dx, dy), r = ch / 2 / Math.sin(Math.abs(c) / 2), h = Math.sqrt(Math.max(0, r * r - ch * ch / 4)) * Math.sign(c);
+        const mx = (x1 + x2) / 2 - dy / ch * h, my = (y1 + y2) / 2 + dx / ch * h; const a0 = Math.atan2(y1 - my, x1 - mx);
+        arcSegs(mx, my, r, a0, a0 + c, 10).forEach(([a, b, cc, d]) => traces.push({ x1: a, y1: b, x2: cc, y2: d, w: wd, layer: l, net }));
+      } else traces.push({ x1, y1, x2, y2, w: wd, layer: l, net });
+    });
+    sg.querySelectorAll("via").forEach((v) => vias.push({ x: +v.getAttribute("x") * MIL, y: +v.getAttribute("y") * MIL, r: ((+v.getAttribute("diameter") || (+v.getAttribute("drill") || 0.3) * 2)) * MIL / 2, net }));
+    sg.querySelectorAll("polygon").forEach((pg) => { const l = +pg.getAttribute("layer"); if (!(l >= 1 && l <= 16)) return; seen.add(l); zones.push({ layer: l, net, poly: [...pg.querySelectorAll("vertex")].map((v) => [+v.getAttribute("x") * MIL, +v.getAttribute("y") * MIL]) }); });
+  });
+  const layers = [...seen].sort((a, b) => a - b).map((l) => ({ id: l, name: (l === 1 ? "Top" : l === 16 ? "Bottom" : "Inner " + l) + (lname.get(l) && !/^(Top|Bottom)$/i.test(lname.get(l)) ? " (" + lname.get(l) + ")" : ""), side: l === 1 ? "T" : l === 16 ? "B" : "I" }));
+  return { parts, pins, segments: segs, traces, vias, zones, layers };
 }
 
 /* ============================================================ IPC-D-356 */

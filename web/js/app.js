@@ -31,14 +31,14 @@ async function getPdf() {
 }
 
 /* ---------------- state ---------------- */
-export const S = { board: null, sch: null, sel: null, pinSel: -1, side: "T", airwires: true, depth: 2, caps: false, layout: "split",
+export const S = { board: null, sch: null, sel: null, pinSel: -1, side: "T", airwires: true, depth: 2, caps: false, layout: "split", copper: { traces: true, zones: true, vias: true },
   tree: [], hl: new Map(), hlSch: new Map(), hitCursor: 0, hoverTok: null, lastError: null };
 const bv = { scale: 1, ox: 0, oy: 0, fit: 1 };
 const sv = { page: 0, zoom: 1, ox: 0, oy: 0, fit: 1 };
 let T = {};
 function readTheme() {
   const cs = getComputedStyle(document.documentElement), g = (n) => cs.getPropertyValue(n).trim();
-  T = { bg: g("--pane"), fill: g("--b-fill"), edge: g("--b-edge"), part: g("--b-part"), pin: g("--b-pin"), gnd: g("--b-gnd"),
+  T = { bg: g("--b-bg") || g("--pane"), pane: g("--pane"), fill: g("--b-fill"), edge: g("--b-edge"), part: g("--b-part"), pin: g("--b-pin"), gnd: g("--b-gnd"),
     label: g("--b-label"), sel: g("--b-sel"), ink: g("--b-pin-ink"), fg: g("--fg"), muted: g("--muted"), line: g("--line2"),
     nets: [0, 1, 2, 3, 4, 5, 6].map((i) => g("--n" + i)) };
 }
@@ -79,7 +79,35 @@ export function finalizeBoard(b) {
   b.netByUpper = new Map([...nets.keys()].map((n) => [n.toUpperCase(), n]));
   b.grid = { T: buildGrid(b, "T"), B: buildGrid(b, "B") };
   b.hasBottom = b.parts.some((p) => p.side === "B");
+  if (!b.synthOutline) { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; b.outline.forEach((poly) => poly.forEach(([x, y]) => { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); })); b.dims = { w: x1 - x0, h: y1 - y0 }; }
+  if (b.traces && b.traces.length) buildCopper(b);
   return b;
+}
+// Copper (design-tool formats): one Path2D per layer and track width, plus per-net indexes for highlighting.
+const LAYER_COLORS = { T: "#e0703a", B: "#4b8ff0", I: ["#3fbf7a", "#d4b030", "#b07af0", "#30c0c0", "#ea6aa6", "#9aac3c", "#f09a50", "#7a9cf0"] };
+function buildCopper(b) {
+  b.layerInfo = new Map(); let inner = 0;
+  b.layers.forEach((l, i) => { b.layerInfo.set(l.id, { ...l, idx: i, color: l.side === "T" ? LAYER_COLORS.T : l.side === "B" ? LAYER_COLORS.B : LAYER_COLORS.I[inner++ % LAYER_COLORS.I.length], tracks: new Map(), zones: new Path2D(), nZones: 0, n: 0 }); });
+  b.netTraces = new Map(); b.netZones = new Map();
+  b.traces.forEach((t, i) => {
+    const L = b.layerInfo.get(t.layer); if (!L) return; L.n++;
+    const wk = Math.round(t.w * 4) / 4; if (!L.tracks.has(wk)) L.tracks.set(wk, new Path2D()); const pth = L.tracks.get(wk); pth.moveTo(t.x1, t.y1); pth.lineTo(t.x2, t.y2);
+    if (t.net) { if (!b.netTraces.has(t.net)) b.netTraces.set(t.net, []); b.netTraces.get(t.net).push(i); }
+  });
+  (b.zones || []).forEach((z, i) => {
+    const L = b.layerInfo.get(z.layer); if (!L) return; L.nZones++;
+    const pp = new Path2D(); z.poly.forEach(([x, y], k) => (k ? pp.lineTo(x, y) : pp.moveTo(x, y))); pp.closePath(); L.zones.addPath(pp); z.path = pp;
+    if (z.net) { if (!b.netZones.has(z.net)) b.netZones.set(z.net, []); b.netZones.get(z.net).push(i); }
+  });
+  b.viaPath = new Path2D(); (b.vias || []).forEach((v) => { b.viaPath.moveTo(v.x + v.r, v.y); b.viaPath.arc(v.x, v.y, v.r, 0, Math.PI * 2); });
+  // remembered layer colours / visibility for this board's layer names
+  let saved = {}; try { saved = JSON.parse(localStorage.getItem("tl.layers") || "{}"); } catch (e) {}
+  for (const L of b.layerInfo.values()) { const k = b.format + ":" + L.id; if (saved[k]) { if (saved[k].c) L.color = saved[k].c; if (saved[k].off) L.off = true; } }
+}
+function saveLayerPrefs() {
+  const b = S.board; if (!b || !b.layerInfo) return; let saved = {}; try { saved = JSON.parse(localStorage.getItem("tl.layers") || "{}"); } catch (e) {}
+  for (const L of b.layerInfo.values()) saved[b.format + ":" + L.id] = { c: L.color, off: !!L.off };
+  try { localStorage.setItem("tl.layers", JSON.stringify(saved)); } catch (e) {}
 }
 function buildGrid(b, side) {
   const g = new Map(), C = b.cell;
@@ -226,6 +254,7 @@ function drawBoard() {
   ctx.beginPath();
   for (const poly of b.outline) { poly.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath(); }
   ctx.fillStyle = T.fill; ctx.fill("evenodd"); ctx.lineWidth = 1.5 * px; ctx.strokeStyle = T.edge; if (b.synthOutline) ctx.setLineDash([6 * px, 5 * px]); ctx.stroke(); ctx.setLineDash([]);
+  if (b.layerInfo && S.copper.traces) drawCopper(ctx, b, side, px);
   // parts
   const selPart = S.sel && S.sel.type === "part" ? b.partByName.get(S.sel.name.toUpperCase()) : -1;
   const visParts = []; ctx.beginPath();
@@ -275,6 +304,43 @@ function drawBoard() {
     ctx.fillText(p.name, (x0 + x1) / 2, (y0 + y1) / 2); ctx.globalAlpha = 1;
   }
   ctx.textAlign = "left"; ctx.font = "600 11px " + FONT_UI; ctx.fillStyle = T.muted; ctx.fillText(side === "B" ? "BOTTOM · MIRRORED" : "TOP", 10, H - 12);
+}
+
+function drawCopper(ctx, b, side, px) {
+  const Ls = [...b.layerInfo.values()].filter((L) => !L.off);
+  // farthest layers first, the side being viewed last (on top)
+  const rank = (L) => (L.side === side ? 2 : L.side === "I" ? 1 : 0);
+  Ls.sort((a, c) => rank(a) - rank(c) || (side === "T" ? c.idx - a.idx : a.idx - c.idx));
+  const dim = S.sel ? 0.45 : 1; ctx.lineCap = "round"; ctx.lineJoin = "round";
+  if (S.copper.zones) for (const L of Ls) if (L.nZones) { ctx.globalAlpha = (L.side === side ? 0.3 : 0.07) * dim; ctx.fillStyle = L.color; ctx.fill(L.zones, "evenodd"); }
+  for (const L of Ls) {
+    ctx.globalAlpha = (L.side === side ? 0.92 : L.side === "I" ? 0.5 : 0.38) * dim; ctx.strokeStyle = L.color;
+    for (const [w, pth] of L.tracks) { ctx.lineWidth = Math.max(w, 1.1 * px); ctx.stroke(pth); }
+  }
+  if (S.copper.vias && b.vias && b.vias.length) { ctx.globalAlpha = 0.85 * dim; ctx.fillStyle = T.part; ctx.fill(b.viaPath); }
+  ctx.globalAlpha = 1;
+  // the selected net and its subnets, in their highlight colours, on every visible layer
+  for (const [net, ci] of S.hl) {
+    if (b.gnd.has(net) && !(S.sel && S.sel.name === net)) continue;
+    const zs = S.copper.zones && b.netZones.get(net);
+    if (zs) { ctx.globalAlpha = 0.35; ctx.fillStyle = T.nets[ci]; for (const zi of zs) { const z = b.zones[zi]; const L = b.layerInfo.get(z.layer); if (L && !L.off) ctx.fill(z.path, "evenodd"); } ctx.globalAlpha = 1; }
+    const ts = b.netTraces.get(net); if (!ts) continue;
+    for (const ti of ts) { const t = b.traces[ti]; const L = b.layerInfo.get(t.layer); if (!L || L.off) continue;
+      ctx.globalAlpha = L.side === side || L.side === "I" ? 1 : 0.55; ctx.strokeStyle = T.nets[ci]; ctx.lineWidth = Math.max(t.w, 2.2 * px);
+      ctx.beginPath(); ctx.moveTo(t.x1, t.y1); ctx.lineTo(t.x2, t.y2); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+  }
+}
+// Nearest visible trace to a board point (for clicking a trace to select its net).
+function hitTrace(x, y, tol) {
+  const b = S.board; if (!b || !b.layerInfo || !S.copper.traces) return null; let best = null, bd = Infinity;
+  for (const t of b.traces) {
+    if (!t.net) continue; const L = b.layerInfo.get(t.layer); if (!L || L.off) continue;
+    const dx = t.x2 - t.x1, dy = t.y2 - t.y1, l2 = dx * dx + dy * dy; let u = l2 ? ((x - t.x1) * dx + (y - t.y1) * dy) / l2 : 0; u = Math.max(0, Math.min(1, u));
+    const d = Math.hypot(x - (t.x1 + u * dx), y - (t.y1 + u * dy)) - t.w / 2 + (L.side === S.side ? 0 : tol * 0.5);
+    if (d < bd) { bd = d; best = t; }
+  }
+  return bd <= tol ? best : null;
 }
 
 /* ---------------- schematic view ---------------- */
@@ -332,7 +398,7 @@ function schNeeds() {
 }
 function drawSch() {
   const [W, H, d] = sizeCanvas(scv, swrap); if (!W || !H) return;
-  const ctx = scv.getContext("2d"); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = T.bg; ctx.fillRect(0, 0, scv.width, scv.height);
+  const ctx = scv.getContext("2d"); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = T.pane; ctx.fillRect(0, 0, scv.width, scv.height);
   const sch = S.sch; if (!sch) { canvasMsg(ctx, W, H, d, ["No schematic loaded", "Open a schematic PDF, or drop it here"]); return; }
   const pg = sch.pages[sv.page]; ctx.setTransform(d, 0, 0, d, 0, 0);
   const x = sv.ox, y = sv.oy, w = pg.w * sv.zoom, h = pg.h * sv.zoom;
@@ -662,7 +728,8 @@ export function renderInspector() {
     const list = [...parts].map((i) => b.parts[i]).sort((a, c) => a.name.localeCompare(c.name, undefined, { numeric: true })).slice(0, 200);
     h += `<div class="sec"><h3>Parts on this net</h3><div class="chips">${list.map((p) => { const pn = p.pins.filter((i) => b.pins[i].net === sel.name).map((i) => b.pins[i].num).slice(0, 4).join(",");
       return `<button class="chip${p.side === "B" ? " dim" : ""}" data-part="${esc(p.name)}" title="${esc((p.desc ? p.desc + " · " : "") + (p.side === "B" ? "Bottom side" : p.side === "BOTH" ? "Through-hole" : "Top side"))}">${esc(p.name)}.${esc(pn)}</button>`; }).join("")}${parts.size > 200 ? `<span class="foot">+${parts.size - 200} more</span>` : ""}</div></div>`;
-    if (!gnd && S.airwires) h += `<p class="foot">Lines on the board are airwires: the shortest pin-to-pin links within a net. Boardview files store pins and nets, not copper routing.</p>`;
+    if (b.layerInfo) { const nt = (b.netTraces.get(sel.name) || []).length; h += `<p class="foot">${nt ? `${nt} trace segment${nt > 1 ? "s" : ""} on ${[...new Set((b.netTraces.get(sel.name) || []).map((i) => b.layerInfo.get(b.traces[i].layer).name))].join(", ")} are lit up in the net's colour.` : "No copper traces on this net in the file."} Choose which layers to see with the Layers button.</p>`; }
+    else if (!gnd && S.airwires) h += `<p class="foot">Lines on the board are airwires: the shortest pin-to-pin links within a net. This file format stores pins and nets, not copper traces.</p>`;
   } else if (sel.type === "part") {
     const i = b ? b.partByName.get(sel.name.toUpperCase()) : undefined; const p = i !== undefined ? b.parts[i] : null;
     h += `<div class="selh"><div class="kind">Part</div><h2>${esc(sel.name)}</h2>${p && p.desc ? `<div class="desc">${esc(p.desc)}</div>` : ""}<div class="meta">${p ? `${p.side === "B" ? "Bottom side" : p.side === "BOTH" ? "Through-hole / both sides" : "Top side"} · ${p.pins.length} pin${p.pins.length > 1 ? "s" : ""}` : "Not in boardview"}</div><div class="row"><button class="btn" data-act="ask">Ask Flux</button><button class="btn" data-act="clear">Clear</button></div></div>`;
@@ -733,12 +800,15 @@ interact(bc, {
   click(x, y, e) {
     const b = S.board; if (!b) return; const [wx, wy] = s2b(x, y); const pi = hitPin(wx, wy, 5 / bv.scale);
     if (pi >= 0 && !e.shiftKey) { const p = b.pins[pi]; if (p.net) { select({ type: "net", name: p.net }, { focusBoard: false, pin: pi }); return; } select({ type: "part", name: b.parts[p.part].name }, { focusBoard: false }); return; }
-    const pt = pi >= 0 ? b.pins[pi].part : hitPart(wx, wy); if (pt >= 0) select({ type: "part", name: b.parts[pt].name }, { focusBoard: false });
+    const pt = pi >= 0 ? b.pins[pi].part : hitPart(wx, wy); if (pt >= 0) { select({ type: "part", name: b.parts[pt].name }, { focusBoard: false }); return; }
+    const tr = hitTrace(wx, wy, 4 / bv.scale); if (tr) select({ type: "net", name: tr.net }, { focusBoard: false });
   },
   hover(x, y) {
     const b = S.board; if (!b) return; const [wx, wy] = s2b(x, y); const pi = hitPin(wx, wy, 5 / bv.scale);
     if (pi >= 0) { const p = b.pins[pi]; const pt = b.parts[p.part]; bc.style.cursor = "pointer"; showTip(btip, bwrap, x, y, `<b>${esc(pt.name)}</b><span>.${esc(p.num)}</span> ${p.net ? esc(p.net) : "<span>no net</span>"}${pt.desc ? ` <span>· ${esc(pt.desc)}</span>` : ""}`); return; }
-    const pt = hitPart(wx, wy); bc.style.cursor = pt >= 0 ? "pointer" : "crosshair"; showTip(btip, bwrap, x, y, pt >= 0 ? `<b>${esc(b.parts[pt].name)}</b> <span>${b.parts[pt].pins.length} pins${b.parts[pt].desc ? " · " + esc(b.parts[pt].desc) : ""}</span>` : "");
+    const pt = hitPart(wx, wy);
+    if (pt < 0) { const tr = hitTrace(wx, wy, 3 / bv.scale); if (tr) { const L = b.layerInfo.get(tr.layer); bc.style.cursor = "pointer"; showTip(btip, bwrap, x, y, `<b>${esc(tr.net)}</b> <span>· trace on ${esc(L ? L.name : tr.layer)} · ${(tr.w * 0.0254).toFixed(3)} mm wide</span>`); return; } }
+    bc.style.cursor = pt >= 0 ? "pointer" : "crosshair"; showTip(btip, bwrap, x, y, pt >= 0 ? `<b>${esc(b.parts[pt].name)}</b> <span>${b.parts[pt].pins.length} pins${b.parts[pt].desc ? " · " + esc(b.parts[pt].desc) : ""}</span>` : "");
   },
   leave() { btip.hidden = true; },
 });
@@ -811,8 +881,6 @@ function toggleAI(on) {
 }
 $("#aiBubble").addEventListener("click", () => toggleAI(true));
 $("#guideBtn").addEventListener("click", () => app.assistant && app.assistant.guideCard());
-$("#tbOpenBoard").addEventListener("click", () => $("#fBoard").click());
-$("#tbOpenSch").addEventListener("click", () => $("#fSch").click());
 $("#tbLibrary").addEventListener("click", () => openLibrary());
 
 /* ---------------- menu bar ---------------- */
@@ -824,7 +892,7 @@ function showMenu(name) {
   // reflect live state as checkmarks
   d.querySelectorAll("[data-cmd]").forEach((b) => b.removeAttribute("aria-checked"));
   const chk = (cmd, on) => { const b = d.querySelector(`[data-cmd="${cmd}"]`); if (b) b.setAttribute("aria-checked", on ? "true" : "false"); };
-  if (name === "view") { chk("split-side", splitDir === "side"); chk("split-stack", splitDir === "stack"); chk("view-split", S.layout === "split"); chk("view-board", S.layout === "board"); chk("view-sch", S.layout === "sch"); chk("side-top", S.side === "T"); chk("side-bottom", S.side === "B"); chk("airwires", S.airwires); const m = config.theme_mode || "system"; chk("theme-system", m === "system"); chk("theme-light", m === "light"); chk("theme-dark", m === "dark"); }
+  if (name === "view") { chk("split-side", splitDir === "side"); chk("split-stack", splitDir === "stack"); chk("view-split", S.layout === "split"); chk("view-board", S.layout === "board"); chk("view-sch", S.layout === "sch"); chk("side-top", S.side === "T"); chk("side-bottom", S.side === "B"); chk("airwires", S.airwires); const m = config.theme_mode || "system"; $("#themeMenu").innerHTML = THEMES.map((t) => `<button role="menuitem" data-cmd="theme" data-id="${t.id}" aria-checked="${t.id === m}">${esc(t.name)}</button>`).join(""); }
   if (name === "assistant") chk("ai-toggle", !$("#aiPane").hidden);
   if (name === "file") fillRecentMenu();
   if (name === "bench" && app.bench) { $("#benchMenu").innerHTML = app.bench.menuItems().map((i) => `<button role="menuitem" data-cmd="bench-show" data-id="${esc(i.id)}" aria-checked="${i.show}">${esc(i.name)}<span class="acc">${esc(i.status)}</span></button>`).join("") || `<div class="mlabel" style="text-transform:none;letter-spacing:0">No instruments yet</div>`; chk("bench-bar", app.bench.barOn); }
@@ -842,7 +910,7 @@ const MENU_CMDS = {
   "open-db": () => openDbDialog(), tutorial: () => startTour(),
   "side-top": () => setSide("T"), "side-bottom": () => setSide("B"), fit: () => { fitBoard(); fitSch(); },
   airwires: () => { const a = $("#airw"); a.checked = !a.checked; a.dispatchEvent(new Event("change")); },
-  "theme-system": () => saveTheme("system"), "theme-light": () => saveTheme("light"), "theme-dark": () => saveTheme("dark"),
+  theme: (b) => saveTheme(b.dataset.id), settings: () => openSettings(),
   "ai-toggle": () => toggleAI(), "ai-new": () => $("#aiNew").click(), "ai-ask": () => app.assistant && app.assistant.askAboutSelection(),
   guided: () => app.assistant && app.assistant.guideCard(), sample: () => loadSample(),
   library: () => openLibrary(), "offline-ai": () => openLocalAI(),
@@ -871,6 +939,7 @@ document.addEventListener("keydown", (e) => {
   if (e.target.closest("input,select,textarea")) { if (e.key === "Escape") closeMenus(); return; }
   if (e.ctrlKey && (e.key === "o" || e.key === "O")) { e.preventDefault(); $("#fBoard").click(); return; }
   if (e.ctrlKey && (e.key === "l" || e.key === "L")) { e.preventDefault(); openLibrary(); return; }
+  if (e.ctrlKey && e.key === ",") { e.preventDefault(); openSettings(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === "/") { e.preventDefault(); q.focus(); }
   else if (e.key === "Escape") { if (openMenu) closeMenus(); else select(null); }
@@ -887,7 +956,8 @@ export function onBoardChange(fn) { boardListeners.add(fn); }
 function setBoard(b) {
   if (!b.sample) hideWelcome();
   S.board = b; if (S.sch && S.sch.sample && !b.sample) { S.sch = null; resetSR(); updatePageSel(); $("#schName").textContent = ""; }
-  $("#boardName").textContent = `${b.name} · ${b.format} · ${b.parts.length} parts · ${b.nets.size} nets`;
+  $("#boardName").textContent = $("#boardName").title = boardLabel(b); renderLayersButton();
+  S.airwires = !b.layerInfo; $("#airw").checked = S.airwires; // real traces make airwires redundant
   S.side = "T"; document.querySelectorAll("#sideSeg button").forEach((x) => x.setAttribute("aria-pressed", x.dataset.s === "T"));
   lastErr = null; select(null); fitBoard(); loadReadings();
   boardListeners.forEach((f) => { try { f(b); } catch (e) {} });
@@ -919,6 +989,43 @@ export async function openSchBytes(bytes, name, meta = {}) {
   try { const sch = await loadPdf(bytes, name); sch.auto = !!meta.auto; setSch(sch); remember("schematic", keep, `${sch.pages.length} pages`, meta); return true; }
   catch (err) { console.error(err); $("#sprog").hidden = true; showError("Couldn’t open that PDF: " + (err.message || err)); return false; }
 }
+
+// "board.brd · Format · 412 parts · 380 nets · 158.4 × 92.1 mm (6.24 × 3.63 in)". The size comes from the
+// file's own outline; boards without one get a placeholder outline, so no size is claimed for them.
+function boardLabel(b) {
+  const d = b.dims ? ` · ${(b.dims.w * 0.0254).toFixed(1)} × ${(b.dims.h * 0.0254).toFixed(1)} mm (${(b.dims.w / 1000).toFixed(2)} × ${(b.dims.h / 1000).toFixed(2)} in)` : " · no outline in file";
+  return `${b.name} · ${b.format} · ${b.parts.length} parts · ${b.nets.size} nets${b.layerInfo ? ` · ${b.layerInfo.size} copper layers` : ""}${d}`;
+}
+
+/* ---------------- copper layers menu ---------------- */
+function renderLayersButton() {
+  const btn = $("#layersBtn"), b = S.board; btn.hidden = !(b && b.layerInfo); if (btn.hidden) { $("#layersPop").hidden = true; return; }
+  const on = [...b.layerInfo.values()].filter((L) => !L.off).length; btn.textContent = `Layers ${on}/${b.layerInfo.size}`;
+}
+function renderLayersPop() {
+  const b = S.board, pop = $("#layersPop"); if (!b || !b.layerInfo) return;
+  pop.innerHTML = `<div class="lp-h">Copper layers <span class="foot">${b.traces.length.toLocaleString()} trace segments</span></div>
+    <label class="chk"><input type="checkbox" data-c="traces" ${S.copper.traces ? "checked" : ""}>Show copper</label>
+    <label class="chk"><input type="checkbox" data-c="zones" ${S.copper.zones ? "checked" : ""} ${b.zones && b.zones.length ? "" : "disabled"}>Copper pours${b.zones && b.zones.length ? "" : " (none in file)"}</label>
+    <label class="chk"><input type="checkbox" data-c="vias" ${S.copper.vias ? "checked" : ""} ${b.vias && b.vias.length ? "" : "disabled"}>Vias${b.vias && b.vias.length ? ` (${b.vias.length})` : " (none in file)"}</label>
+    <div class="lp-list">${[...b.layerInfo.values()].map((L) => `<div class="lp-row"><input type="checkbox" data-l="${esc(L.id)}" ${L.off ? "" : "checked"} aria-label="Show ${esc(L.name)}"><input type="color" data-lc="${esc(L.id)}" value="${esc(L.color)}" aria-label="Colour of ${esc(L.name)}"><span class="lp-n">${esc(L.name)}</span><span class="foot">${L.n ? L.n.toLocaleString() : ""}${L.nZones ? " + pours" : ""}</span><button class="btn lp-only" data-only="${esc(L.id)}" title="Show only this layer">Only</button></div>`).join("")}</div>
+    <div class="row2"><button class="btn" data-lall="1">Show all</button><button class="btn" data-lside="1">This side only</button></div>
+    <p class="foot" style="margin:0">The side you're viewing is drawn on top; other layers are dimmed. Click a trace to select its net.</p>`;
+}
+$("#layersBtn").addEventListener("click", (e) => { e.stopPropagation(); const pop = $("#layersPop"); pop.hidden = !pop.hidden; if (!pop.hidden) renderLayersPop(); });
+document.addEventListener("click", (e) => { const pop = $("#layersPop"); if (!pop.hidden && e.target.isConnected && !e.target.closest("#layersPop,#layersBtn")) pop.hidden = true; });
+$("#layersPop").addEventListener("input", (e) => { const id = e.target.dataset.lc; if (id === undefined) return; const L = [...S.board.layerInfo.values()].find((x) => String(x.id) === id); if (L) { L.color = e.target.value; reqB(); } });
+$("#layersPop").addEventListener("change", (e) => {
+  const b = S.board; if (!b) return; const t = e.target;
+  if (t.dataset.c) S.copper[t.dataset.c] = t.checked;
+  if (t.dataset.l !== undefined) { const L = [...b.layerInfo.values()].find((x) => String(x.id) === t.dataset.l); if (L) L.off = !t.checked; }
+  saveLayerPrefs(); renderLayersButton(); reqB();
+});
+$("#layersPop").addEventListener("click", (e) => {
+  const b = S.board; const t = e.target.closest("button"); if (!b || !t) return;
+  for (const L of b.layerInfo.values()) { if (t.dataset.only) L.off = String(L.id) !== t.dataset.only; if (t.dataset.lall) L.off = false; if (t.dataset.lside) L.off = L.side !== S.side; }
+  S.copper.traces = true; saveLayerPrefs(); renderLayersPop(); renderLayersButton(); reqB();
+});
 
 /* ---------------- recent files + reopen prompt ---------------- */
 // Opened files are copied to the app's data folder (the page never learns their paths), so they can be
@@ -987,7 +1094,7 @@ $("#welcome").addEventListener("click", async (e) => {
 });
 async function loadSample() {
   S.board = buildSample(); S.sch = buildSampleSchematic(S.board); resetSR(); sv.page = 0;
-  $("#boardName").textContent = `${S.board.name} · ${S.board.parts.length} parts · ${S.board.nets.size} nets`;
+  $("#boardName").textContent = $("#boardName").title = boardLabel(S.board); renderLayersButton();
   $("#schName").textContent = `${S.sch.name} · ${S.sch.pages.length} pages`;
   await new Promise((r) => requestAnimationFrame(r));
   fitBoard(); fitSch(); updatePageSel(); loadReadings(); select({ type: "net", name: "PP3V3_S5" }, { focusBoard: false });
@@ -1114,7 +1221,7 @@ export function openSettings() {
   syncProvider(true);
   $("#sXzz").value = config.xzz_key || ""; $("#sCae").value = config.cae_key || "";
   const mode = config.theme_mode || "system", accent = config.accent || "copper";
-  document.querySelectorAll("#sThemeSeg button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.mode === mode));
+  renderThemePicker(mode); bcDraft = Object.assign({}, config.board_colors || {}); renderBoardColors();
   document.querySelectorAll("#sAccent .sw").forEach((b) => b.setAttribute("aria-pressed", b.dataset.accent === accent));
   document.querySelectorAll("#sSplitSeg button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.dir === splitDir));
   syncDbSettings();
@@ -1165,20 +1272,20 @@ async function loadModels(quiet) {
   } catch (e) { if (!quiet) say("Couldn't list models: " + e.message, false); }
 }
 $("#sLoadModels").addEventListener("click", () => loadModels(false));
-$("#settingsBtn").addEventListener("click", openSettings);
 // live theme preview while the dialog is open
-$("#sThemeSeg").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; document.querySelectorAll("#sThemeSeg button").forEach((x) => x.setAttribute("aria-pressed", x === b)); applyAppearance(b.dataset.mode, currentAccent()); });
+$("#sThemes").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; document.querySelectorAll("#sThemes button").forEach((x) => x.setAttribute("aria-pressed", x === b)); applyAppearance(b.dataset.mode, currentAccent()); });
 $("#sAccent").addEventListener("click", (e) => { const b = e.target.closest(".sw"); if (!b) return; document.querySelectorAll("#sAccent .sw").forEach((x) => x.setAttribute("aria-pressed", x === b)); applyAppearance(currentMode(), b.dataset.accent); });
 $("#settings").addEventListener("click", (e) => { const o = e.target.closest("[data-open]"); if (o && hasBackend) { e.preventDefault(); api("/api/open?url=" + encodeURIComponent(o.dataset.open), { method: "POST" }).catch(() => {}); } });
-const currentMode = () => (document.querySelector("#sThemeSeg button[aria-pressed=true]") || {}).dataset?.mode || "system";
+const currentMode = () => (document.querySelector("#sThemes button[aria-pressed=true]") || {}).dataset?.mode || "system";
 const currentAccent = () => (document.querySelector("#sAccent .sw[aria-pressed=true]") || {}).dataset?.accent || "copper";
 dlg.addEventListener("close", async () => {
-  if (dlg.returnValue !== "save") { applyAppearance(config.theme_mode, config.accent); return; } // revert live preview on cancel
+  if (dlg.returnValue !== "save") { applyAppearance(config.theme_mode, config.accent); applyBoardColors(config.board_colors); return; } // revert live preview on cancel
+  config.board_colors = bcDraft;
   const provider = $("#sProvider").value, model = provider === "local" ? config.local_model || "" : $("#sModel").value.trim();
   if (provider === "local" && !model) { toast("Download an offline model first (Settings → Offline AI…). The AI service wasn't changed."); }
   setLsModel(provider, model);
   const body = { provider, model, base_url: $("#sBase").value.trim(), xzz_key: $("#sXzz").value.trim(), cae_key: $("#sCae").value.trim(),
-    theme_mode: currentMode(), accent: currentAccent(), readings_mode: $("#sDbMode").value, readings_dir: $("#sDbDir").value.trim(),
+    theme_mode: currentMode(), accent: currentAccent(), board_colors: bcDraft, readings_mode: $("#sDbMode").value, readings_dir: $("#sDbDir").value.trim(),
     boards_dir: $("#sBoardsDir").value.trim(), schematics_dir: $("#sSchDir").value.trim(), auto_schematic: $("#sAutoSch").checked };
   if (provider === "local" && !model) { body.provider = config.provider; body.model = config.model; }
   const k = $("#sKey").value.trim(); if (k) body.api_key = k;
@@ -1300,7 +1407,7 @@ async function autoSchematic(boardName) {
 
 /* ---------------- offline AI (llama.cpp + Gemma 4 on this PC) ---------------- */
 const alDlg = $("#aiLocalDlg"); let alData = null, alState = {}, alTimer = 0;
-const MODEL_NAME = (id) => ((alData && alData.advice.models.find((m) => m.id === id)) || {}).name || id;
+const MODEL_NAME = (id) => { const d = alData || swLocal; if (!d) return id; const c = (d.advice && d.advice.models.find((m) => m.id === id)) || (d.external || []).find((x) => x.id === id); return c ? c.name + (c.source ? ` (${c.source})` : "") : id; };
 async function localInfo() { const r = await api("/api/localai"); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }
 async function localStatusText() {
   if (!hasBackend) return "Offline AI needs the Trace Lab desktop app.";
@@ -1320,7 +1427,7 @@ export async function openLocalAI() {
   try { alData = await localInfo(); } catch (e) { $("#alChoice").innerHTML = `<p class="err-msg">${esc(e.message)}</p>`; return; }
   alState = { model: alData.selected || alData.advice.recommended, engine: alData.engine || alData.advice.engine };
   renderAIChoice($("#alChoice"), alData, alState, { onChange: syncLocalButtons });
-  $("#alDir").value = alData.dir; syncLocalButtons(); pollLocal();
+  $("#alDir").value = alData.dir; syncLocalButtons(); renderExternal(); pollLocal();
 }
 function syncLocalButtons() {
   if (!alData) return; const have = (alData.installed || []).some((x) => x.id === alState.model); const p = alData.progress || {};
@@ -1347,7 +1454,7 @@ async function useLocal(model, afterDownload) {
   const r = await api("/api/localai/use", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, engine: alState.engine }) }); const j = await r.json().catch(() => ({}));
   if (!r.ok) { $("#alSt").className = "st bad"; $("#alSt").textContent = (j.error && j.error.message) || "Couldn't switch."; return; }
   Object.assign(config, j); $("#alSt").className = "st ok"; $("#alSt").textContent = `✓ ${afterDownload ? "Downloaded. " : ""}Flux now uses ${MODEL_NAME(model)} on this PC.`;
-  toast(`Flux now uses ${MODEL_NAME(model)}, running offline on this PC.`); app.assistant && app.assistant.refresh(); syncLocalButtons();
+  toast(`Flux now uses ${MODEL_NAME(model)}, running offline on this PC.`); app.assistant && app.assistant.refresh(); syncLocalButtons(); renderExternal(); loadPickerData();
   api("/api/localai/start", { method: "POST" }).catch(() => {}); // warm it up
 }
 $("#alGo").addEventListener("click", async () => {
@@ -1357,6 +1464,22 @@ $("#alGo").addEventListener("click", async () => {
   if (!r.ok) { $("#alSt").className = "st bad"; $("#alSt").textContent = (j.error && j.error.message) || "Couldn't start the download."; return; }
   alData.progress = j; syncLocalButtons(); pollLocal();
 });
+function renderExternal() {
+  const ext = (alData && alData.external) || []; const using = config.provider === "local" ? config.local_model : "";
+  $("#alExt").innerHTML = ext.length ? `<div class="extl">${ext.map((e) => `<div class="extr"><div class="t"><b title="${esc(e.path)}">${esc(e.name)}</b><span>${esc(e.source)} · ${fmtGB(e.bytes)}${e.vision ? " · reads images" : " · text only (can't look at schematic pages)"}</span></div>${e.id === using ? `<span class="tag good">In use</span>` : `<button class="btn" type="button" data-ext="${esc(e.id)}">Use</button>`}</div>`).join("")}</div>`
+    : `<p class="foot" style="margin:4px 0">No other GGUF models found${(alData && alData.known_dirs || []).length ? "" : " (no LM Studio or Ollama folders on this PC)"}.</p>`;
+  const dirs = (alData && alData.model_dirs) || [];
+  $("#alDirs").innerHTML = [((alData && alData.known_dirs) || []).length ? "Searched automatically: " + esc(alData.known_dirs.join("; ")) + "." : "", dirs.length ? "Your folders: " + dirs.map((d) => `${esc(d)} <button class="linkbtn" type="button" data-rmdir="${esc(d)}" style="margin:0">remove</button>`).join(", ") : ""].filter(Boolean).join("<br>");
+}
+$("#alExt").addEventListener("click", async (e) => { const b = e.target.closest("[data-ext]"); if (!b) return; alState.model = b.dataset.ext; await useLocal(b.dataset.ext); renderExternal(); });
+$("#alDirs").addEventListener("click", async (e) => { const b = e.target.closest("[data-rmdir]"); if (!b) return; const r = await api("/api/localai/folders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ remove: b.dataset.rmdir }) }); if (r.ok) { Object.assign(alData, await r.json()); renderExternal(); } });
+$("#alAddDir").addEventListener("click", async () => {
+  const d = await pickFolder("Choose a folder with GGUF model files", ""); if (!d) return;
+  const r = await api("/api/localai/folders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ add: d }) }); const j = await r.json().catch(() => ({}));
+  if (!r.ok) { $("#alSt").className = "st bad"; $("#alSt").textContent = (j.error && j.error.message) || "Couldn't add that folder."; return; }
+  Object.assign(alData, j); renderExternal(); $("#alSt").className = "st ok"; $("#alSt").textContent = `✓ Found ${j.external.length} model${j.external.length === 1 ? "" : "s"} on this PC.`;
+});
+$("#alRescan").addEventListener("click", async () => { alData = Object.assign(alData || {}, await (await api("/api/localai?rescan=1")).json()); renderAIChoice($("#alChoice"), alData, alState, { onChange: syncLocalButtons }); renderExternal(); syncLocalButtons(); $("#alSt").className = "st"; $("#alSt").textContent = `Found ${(alData.installed || []).length} Trace Lab model${(alData.installed || []).length === 1 ? "" : "s"} and ${(alData.external || []).length} other${(alData.external || []).length === 1 ? "" : "s"}.`; });
 $("#alPause").addEventListener("click", () => api("/api/localai/cancel", { method: "POST" }));
 $("#alRemove").addEventListener("click", async (e) => {
   const b = e.currentTarget; if (!b.dataset.sure) { b.dataset.sure = "1"; b.textContent = "Delete " + MODEL_NAME(alState.model).split(" · ")[0] + "?"; b.classList.add("primary"); return; }
@@ -1385,6 +1508,99 @@ async function resumeLocalDownload() {
   } catch (e) {}
 }
 
+/* ---------------- model picker in the Flux header ---------------- */
+// Switch between the offline models on this PC and the models of every cloud service with a key.
+let swLocal = null;
+async function loadPickerData() { if (!hasBackend) return; try { swLocal = await localInfo(); } catch (e) {} refreshModelPicker(); }
+function refreshModelPicker() {
+  const sel = $("#aiModelSel"); if (!sel || document.activeElement === sel) return;
+  const groups = []; const cur = config.provider === "local" ? "local|" + (config.local_model || "") : config.provider + "|" + (config.model || "");
+  const loc = [];
+  if (swLocal) {
+    (swLocal.installed || []).forEach((m) => loc.push(["local|" + m.id, (swLocal.advice.models.find((c) => c.id === m.id) || { name: m.id }).name]));
+    (swLocal.external || []).forEach((e) => loc.push(["local|" + e.id, `${e.name} (${e.source})`]));
+  }
+  if (loc.length) groups.push(["Offline · free, on this PC", loc]);
+  for (const [p, info] of Object.entries(PROVIDERS)) {
+    if (p === "local") continue;
+    const usable = p === "custom" ? !!config.base_url : !!(config.keyProviders && config.keyProviders[p]); if (!usable) continue;
+    const ids = []; const add = (m) => { if (m && !ids.includes(m)) ids.push(m); };
+    if (config.provider === p) add(config.model); add(lsModel(p)); info.models.forEach(add);
+    groups.push([info.label, ids.map((m) => { const mi = modelInfo(p, m); return [p + "|" + m, `${m}${mi.free ? " · free" : mi.free === false ? " · paid" : ""}`]; })]);
+  }
+  const known = groups.some(([, opts]) => opts.some(([v]) => v === cur));
+  let html = known || !config.model ? "" : `<option value="${esc(cur)}">${esc(config.model)}</option>`;
+  html += groups.map(([g, opts]) => `<optgroup label="${esc(g)}">${opts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("")}</optgroup>`).join("");
+  html += `<optgroup label="More"><option value="__offline">Download or add offline models…</option><option value="__settings">Connect a cloud AI service…</option></optgroup>`;
+  if (!groups.length && !config.model) html = `<option value="">Choose a model</option>` + html;
+  sel.innerHTML = html; sel.value = known || config.model ? cur : "";
+}
+$("#aiModelSel").addEventListener("focus", () => loadPickerData());
+$("#aiModelSel").addEventListener("mousedown", () => { if (!swLocal) loadPickerData(); });
+$("#aiModelSel").addEventListener("change", async (e) => {
+  const v = e.target.value; e.target.blur();
+  if (v === "__offline") { refreshModelPicker(); openLocalAI(); return; }
+  if (v === "__settings") { refreshModelPicker(); openSettings(); return; }
+  const i = v.indexOf("|"); const p = v.slice(0, i), m = v.slice(i + 1); if (!m) return;
+  try {
+    let r;
+    if (p === "local") r = await api("/api/localai/use", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: m }) });
+    else r = await api("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: p, model: m }) });
+    const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error((j.error && j.error.message) || "HTTP " + r.status);
+    Object.assign(config, j); if (p !== "local") setLsModel(p, m);
+    toast(`Flux now uses ${p === "local" ? MODEL_NAME(m) + " on this PC" : m + " (" + PROVIDERS[p].label + ")"}.`);
+    if (p === "local") api("/api/localai/start", { method: "POST" }).catch(() => {}); // start loading it now
+  } catch (err) { toast("Couldn't switch models: " + err.message); }
+  refreshModelPicker(); app.assistant && app.assistant.refresh();
+});
+
+/* ---------------- themes + board colours ---------------- */
+// preview: [rail, pane, board background, board fill]
+const THEMES = [
+  { id: "system", name: "System", pv: ["#10191c", "#e7eeed", "#030607", "#0f302c"] },
+  { id: "dark", name: "Dark", pv: ["#10191c", "#091013", "#030607", "#0f302c"] },
+  { id: "light", name: "Light", pv: ["#f6f9f8", "#dce5e4", "#aebdbb", "#eef6f2"] },
+  { id: "midnight", name: "Midnight", pv: ["#0f1630", "#080c19", "#02040b", "#0f2252"] },
+  { id: "graphite", name: "Graphite", pv: ["#1b1c1f", "#111214", "#060607", "#1f2924"] },
+  { id: "oled", name: "OLED black", pv: ["#070707", "#000000", "#000000", "#0a1d16"] },
+  { id: "contrast", name: "High contrast", pv: ["#0a0a0a", "#000000", "#000000", "#003d20"] },
+  { id: "paper", name: "Paper", pv: ["#fbf8f1", "#e7e0d2", "#c7bba5", "#fbf9f3"] },
+];
+function renderThemePicker(mode) {
+  $("#sThemes").innerHTML = THEMES.map((t) => `<button type="button" data-mode="${t.id}" aria-pressed="${t.id === mode}"><span class="pv"><i style="background:${t.pv[0]}"></i><span class="bd" style="background:${t.pv[2]}"><b style="background:${t.pv[3]};box-shadow:0 0 0 1px var(--copper)"></b></span></span>${esc(t.name)}</button>`).join("");
+}
+// Board colour schemes (like FlexBV's colour settings): everything drawn in the board view.
+const BC_FIELDS = [["bg", "--b-bg", "Background"], ["fill", "--b-fill", "Board"], ["edge", "--b-edge", "Outline"], ["part", "--b-part", "Part outlines"], ["pin", "--b-pin", "Pins"], ["gnd", "--b-gnd", "Ground pins"], ["label", "--b-label", "Part names"], ["sel", "--b-sel", "Selection"]];
+const BOARD_PRESETS = {
+  theme: { name: "Theme default" },
+  green: { name: "Green solder mask", bg: "#0a0d0c", fill: "#0d4d2a", edge: "#7fd0a0", part: "#a8d5b9", pin: "#e8d9a0", gnd: "#4f6d5c", label: "#e9f5ee", sel: "#ffffff" },
+  black: { name: "Black solder mask", bg: "#3a3e44", fill: "#0b0b0c", edge: "#a7adb4", part: "#6f7680", pin: "#d4af37", gnd: "#4a4f55", label: "#dfe3e8", sel: "#ffd84d" },
+  blue: { name: "Blue solder mask", bg: "#05080e", fill: "#0f3069", edge: "#86b5ff", part: "#9fbbe8", pin: "#e8c96a", gnd: "#4b6386", label: "#e6eefc", sel: "#ffffff" },
+  red: { name: "Red solder mask", bg: "#0d0707", fill: "#6a1414", edge: "#ff9b8a", part: "#e0a8a0", pin: "#f0d27a", gnd: "#8a5a55", label: "#ffecea", sel: "#ffffff" },
+  purple: { name: "Purple solder mask", bg: "#0a0711", fill: "#3b1f6b", edge: "#c9a8ff", part: "#b9a3e0", pin: "#e9cf7a", gnd: "#6c5a8f", label: "#f3ecff", sel: "#ffffff" },
+  white: { name: "White board", bg: "#9aa3ab", fill: "#f6f7f3", edge: "#2f3a44", part: "#6f7c88", pin: "#a77a24", gnd: "#a3adb5", label: "#1d2730", sel: "#d1480f" },
+  classic: { name: "Classic (black, white outlines)", bg: "#000000", fill: "#101010", edge: "#e6e6e6", part: "#9a9a9a", pin: "#c8c8c8", gnd: "#555555", label: "#ffffff", sel: "#ffd000" },
+  xray: { name: "X-ray (pins only stand out)", bg: "#000000", fill: "#06121a", edge: "#2a5a6a", part: "#22404a", pin: "#7fe0ff", gnd: "#1d3540", label: "#5fa8c0", sel: "#ffffff" },
+};
+let bcDraft = {};
+const lum = (hex) => { const n = parseInt(String(hex).replace("#", ""), 16); const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255; return (0.299 * r + 0.587 * g + 0.114 * b) / 255; };
+export function applyBoardColors(bc) {
+  const st = document.documentElement.style; bc = bc || {};
+  const preset = BOARD_PRESETS[bc.preset] && bc.preset !== "theme" ? BOARD_PRESETS[bc.preset] : {};
+  for (const [k, v] of BC_FIELDS) { const c = (bc.custom && bc.custom[k]) || preset[k]; if (c) st.setProperty(v, c); else st.removeProperty(v); }
+  const pin = (bc.custom && bc.custom.pin) || preset.pin; if (pin) st.setProperty("--b-pin-ink", lum(pin) > 0.55 ? "#0a0f12" : "#f5f7f8"); else st.removeProperty("--b-pin-ink");
+}
+function renderBoardColors() {
+  const sel = $("#sBoardPreset"); const cur = bcDraft.preset || "theme";
+  sel.innerHTML = Object.entries(BOARD_PRESETS).map(([k, p]) => `<option value="${k}" ${k === cur ? "selected" : ""}>${esc(p.name)}</option>`).join("") + (bcDraft.custom && Object.keys(bcDraft.custom).length ? `<option value="__custom" selected>Custom (${esc((BOARD_PRESETS[cur] || {}).name || "")} + your changes)</option>` : "");
+  const cs = getComputedStyle(document.documentElement); const hex = (v) => { const c = cs.getPropertyValue(v).trim(); return /^#[0-9a-f]{6}$/i.test(c) ? c : "#000000"; };
+  $("#sBoardColors").innerHTML = BC_FIELDS.map(([k, v, label]) => `<label><input type="color" data-bc="${k}" value="${hex(v)}">${esc(label)}</label>`).join("");
+}
+$("#sBoardPreset").addEventListener("change", (e) => { if (e.target.value === "__custom") return; bcDraft = { preset: e.target.value }; applyBoardColors(bcDraft); renderBoardColors(); });
+$("#sBoardColors").addEventListener("input", (e) => { const k = e.target.dataset.bc; if (!k) return; bcDraft.custom = Object.assign({}, bcDraft.custom, { [k]: e.target.value }); applyBoardColors(bcDraft); });
+$("#sBoardColors").addEventListener("change", () => renderBoardColors());
+$("#sBoardReset").addEventListener("click", () => { bcDraft = { preset: bcDraft.preset || "theme" }; applyBoardColors(bcDraft); renderBoardColors(); });
+
 /* ---------------- split direction ---------------- */
 let splitDir = "side";
 function setSplitDir(dir, save) {
@@ -1402,7 +1618,7 @@ $("#splitDirBtn").addEventListener("click", () => setSplitDir(splitDir === "stac
 const TOUR = [
   { t: null, h: "Welcome to Trace Lab", p: "A one-minute tour of the main parts. You can replay it any time from Help → Tutorial or Settings → Help." },
   { t: ".menus", h: "Menu bar", p: "File opens boardviews, schematic PDFs and your readings database. View changes the layout, board side and theme. Help has updates and this tutorial." },
-  { t: "#tbOpenBoard", h: "Open your files", p: "Open a boardview here, then its schematic PDF with the button beside it. You can also drag files onto the window. File → Open recent, and the prompt at start-up, reopen what you had open last time." },
+  { t: "#tbLibrary", h: "Open your files", p: "Open boardviews and schematic PDFs from the File menu (Ctrl+O), or drag them onto the window. Library searches your boardview and schematic folders; File → Open recent and the prompt at start-up reopen what you had open last time." },
   { t: ".search", h: "Find anything", p: "Type a net, a part or any word from the schematic. Press / to jump here from anywhere." },
   { t: "#boardPane", h: "Board view", p: "Click a pin to select its net, or a part's body to select the part. Scroll to zoom, drag to pan, and press B to flip to the bottom side." },
   { t: "#schPane", h: "Schematic", p: "Click a net name or designator in the PDF to find it on the board. Every match is highlighted in the same colour on both sides." },
@@ -1411,7 +1627,7 @@ const TOUR = [
   { t: "#aiBubble", alt: "#aiPane", h: "Flux, your repair assistant", p: "Click the bubble (or press A) to chat. Flux reads this board and its schematic, your saved readings including known-good values from other boards, and any instruments you connect." },
   { t: "#guideBtn", h: "Guided diagnosis", p: "Flux asks you to probe one point at a time, highlights it on the board, reads your meter live and captures the value when it's steady, then works out the fault from the readings." },
   { t: "#benchBar", h: "Bench instruments", p: "Connect a multimeter, bench power supply or oscilloscope over USB or the network. Click an instrument here to show or hide its live readout. Try Bench → Add demo instruments without any hardware." },
-  { t: "#settingsBtn", h: "Settings", p: "Pick your AI service and model (free and paid models are labelled), colours, the split direction, and where your readings database lives. Store it in OneDrive to back it up and share it between PCs." },
+  { t: ".menus", h: "Settings", p: "File → Settings (Ctrl+,). Pick your AI service and model (free and paid models are labelled), colours, the split direction, and where your readings database lives. Store it in OneDrive to back it up and share it between PCs." },
 ];
 let tourI = -1, tourEls = null;
 export function startTour() {
@@ -1501,7 +1717,8 @@ $("#sCheck").addEventListener("click", async () => {
 export const app = {
   S, sv, config, api, hasBackend, select, selectByName, searchAll, expand, isSeries, sortedHits, getReadings, renderRegion,
   focusBoardOn, focusSchOn, gotoPage, setLayout, setSide, openSettings, reqB, reqS, onSelect, onBoardChange, esc, PROVIDERS, applyAppearance,
-  startTour, openDbDialog, setSplitDir, openLocalAI, openLibrary, get splitDir() { return splitDir; }, saveReadingFor, toast, toggleAI, openRecent, bench: null,
+  startTour, openDbDialog, setSplitDir, openLocalAI, openLibrary, refreshModelPicker, get splitDir() { return splitDir; }, saveReadingFor, toast, toggleAI, openRecent, bench: null,
+  boardToScreen(x, y) { const r = bc.getBoundingClientRect(); const [sx, sy] = b2s(x, y); return [r.left + sx, r.top + sy]; },
   captureBoard(maxW = 1400) {
     drawBoard(); const W = bc.width, H = bc.height; const s = Math.min(1, maxW / W); const c = document.createElement("canvas");
     c.width = Math.round(W * s); c.height = Math.round(H * s); c.getContext("2d").drawImage(bc, 0, 0, c.width, c.height); return c;
@@ -1514,10 +1731,10 @@ window.TraceLab = app;
 readTheme();
 const mq = window.matchMedia("(prefers-color-scheme: dark)"); const rethem = () => { readTheme(); reqB(); reqS(); };
 try { mq.addEventListener("change", rethem); } catch (e) {}
-new MutationObserver(rethem).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-accent"] });
+new MutationObserver(rethem).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-accent", "style"] });
 export function applyAppearance(mode, accent) {
   const el = document.documentElement;
-  if (mode === "light" || mode === "dark") el.setAttribute("data-theme", mode); else el.removeAttribute("data-theme");
+  if (THEMES.some((t) => t.id === mode && t.id !== "system")) el.setAttribute("data-theme", mode); else el.removeAttribute("data-theme");
   el.setAttribute("data-accent", accent || "copper");
 }
 let aiPref = "0"; try { aiPref = localStorage.getItem("tl.ai") || "0"; } catch (e) {}
@@ -1525,7 +1742,7 @@ toggleAI(aiPref === "1");
 [bwrap, swrap].forEach((w) => new ResizeObserver(() => { reqB(); reqS(); }).observe(w));
 (async () => {
   await loadConfig();
-  applyAppearance(config.theme_mode, config.accent);
+  applyAppearance(config.theme_mode, config.accent); applyBoardColors(config.board_colors);
   setSplitDir(config.split_dir || "side", false);
   await loadBuiltinKeys();
   if (config.just_updated) goodNote = `Trace Lab was updated to ${config.version}.`;
@@ -1533,7 +1750,7 @@ toggleAI(aiPref === "1");
   if (hasBackend) app.bench = initBench(app); else $("#benchBar").hidden = true;
   app.assistant = initAssistant(app);
   const opened = await openStartupFiles();
-  resumeLocalDownload();
+  resumeLocalDownload(); loadPickerData();
   // Open empty, and offer to reopen the last files (or start with the sample when there's no backend).
   if (!opened) { if (hasBackend) await showWelcome(); else await loadSample(); }
   renderInspector(); updatePageSel();

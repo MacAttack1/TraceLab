@@ -57,6 +57,40 @@ await t("KiCad", [{ name: "j.kicad_pcb", bytes: enc(`(kicad_pcb (version 2024010
   const p = pinOf(b, "R7", "1"); ok(Math.abs(p.x - 100 / 0.0254) < 0.5 && Math.abs(p.y - -(50 + 0.5) / 0.0254) < 0.5, "kicad rotation " + p.x + "," + p.y);
   ok(b.parts[1].side === "B", "kicad bottom"); ok(b.outline.length === 1, "kicad outline");
 });
+// ---- copper layers in design-tool formats
+await t("KiCad copper", [{ name: "kc.kicad_pcb", bytes: enc(`(kicad_pcb (version 20240108)
+ (net 0 "") (net 1 "+3V3") (net 2 "GND")
+ (footprint "R_0402" (layer "F.Cu") (at 100 50) (property "Reference" "R7")
+  (pad "1" smd rect (at -0.5 0) (size 0.6 0.5) (layers "F.Cu") (net 1 "+3V3")) (pad "2" smd rect (at 0.5 0) (size 0.6 0.5) (layers "F.Cu") (net 2 "GND")))
+ (segment (start 99.5 50) (end 95 50) (width 0.25) (layer "F.Cu") (net 1))
+ (segment (start 95 50) (end 95 55) (width 0.3) (layer "In1.Cu") (net 1))
+ (arc (start 95 55) (mid 96 56) (end 97 55) (width 0.2) (layer "B.Cu") (net 1))
+ (via (at 95 50) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+ (zone (net 2) (net_name "GND") (layer "B.Cu") (filled_polygon (layer "B.Cu") (pts (xy 90 40) (xy 130 40) (xy 130 70) (xy 90 70))))
+ (gr_rect (start 90 40) (end 130 70) (layer "Edge.Cuts")))`) }], {}, (b) => {
+  ok(b.layers.map((l) => l.id).join() === "F.Cu,In1.Cu,B.Cu", "kicad layer order " + b.layers.map((l) => l.id));
+  ok(b.traces.filter((x) => x.layer === "F.Cu").length === 1 && b.traces[0].net === "+3V3" && Math.abs(b.traces[0].w - 0.25 / 0.0254) < 0.01, "kicad segment");
+  ok(b.traces.filter((x) => x.layer === "B.Cu").length > 3, "kicad arc split"); ok(b.vias.length === 1 && b.vias[0].net === "+3V3", "kicad via");
+  ok(b.zones.length === 1 && b.zones[0].net === "GND" && b.zones[0].poly.length === 4, "kicad zone");
+});
+if (typeof DOMParser !== "undefined") await t("Eagle copper", [{ name: "ec.brd", bytes: enc(`<?xml version="1.0"?><eagle><drawing><layers><layer number="1" name="Top"/><layer number="2" name="Route2"/><layer number="16" name="Bottom"/></layers><board>
+<plain><wire x1="0" y1="0" x2="50" y2="0" width="0" layer="20"/><wire x1="50" y1="0" x2="50" y2="30" width="0" layer="20"/><wire x1="50" y1="30" x2="0" y2="30" width="0" layer="20"/><wire x1="0" y1="30" x2="0" y2="0" width="0" layer="20"/></plain>
+<libraries><library name="lib"><packages><package name="R"><smd name="1" x="-1" y="0" dx="1" dy="1"/><smd name="2" x="1" y="0" dx="1" dy="1"/></package></packages></library></libraries>
+<elements><element name="R1" library="lib" package="R" value="10k" x="10" y="10"/></elements>
+<signals><signal name="VCC"><contactref element="R1" pad="1"/><wire x1="9" y1="10" x2="5" y2="10" width="0.3" layer="1"/><wire x1="5" y1="10" x2="5" y2="20" width="0.3" layer="2"/><wire x1="5" y1="20" x2="8" y2="20" width="0.3" layer="16" curve="90"/><via x="5" y="10" extent="1-16" drill="0.4"/></signal>
+<signal name="GND"><contactref element="R1" pad="2"/><polygon width="0.2" layer="16"><vertex x="0" y="0"/><vertex x="50" y="0"/><vertex x="50" y="30"/></polygon></signal></signals></board></drawing></eagle>`) }], {}, (b) => {
+  ok(b.layers.map((l) => l.id).join() === "1,2,16", "eagle layers " + b.layers.map((l) => l.id)); ok(b.layers[1].name.includes("Route2"), "eagle layer name");
+  ok(b.traces.filter((x) => x.layer === 1)[0].net === "VCC", "eagle wire net"); ok(b.traces.filter((x) => x.layer === 16).length > 3, "eagle curve split");
+  ok(b.vias.length === 1, "eagle via"); ok(b.zones.length === 1 && b.zones[0].net === "GND", "eagle polygon");
+});
+await t("GenCAD copper", [{ name: "gc.cad", bytes: enc(`$HEADER\nGENCAD 1.4\nUNITS MM\n$ENDHEADER\n$BOARD\nLINE 0 0 100 0\nLINE 100 0 100 50\nLINE 100 50 0 50\nLINE 0 50 0 0\n$ENDBOARD\n$PADSTACKS\nPADSTACK PS1 0\nPAD P1 TOP 0 0\nPADSTACK V1 0.3\nPAD P1 ALL 0 0\n$ENDPADSTACKS\n$SHAPES\nSHAPE R\nINSERT SMD\nPIN 1 PS1 -0.5 0 TOP 0 0\nPIN 2 PS1 0.5 0 TOP 0 0\n$ENDSHAPES\n$COMPONENTS\nCOMPONENT R1\nPLACE 10 10\nLAYER TOP\nROTATION 0\nSHAPE R 0 0\n$ENDCOMPONENTS\n$SIGNALS\nSIGNAL VCC\nNODE R1 1\n$ENDSIGNALS\n$TRACKS\nTRACK T10 0.254\n$ENDTRACKS\n$ROUTES\nROUTE VCC\nTRACK T10\nLAYER TOP\nLINE 9.5 10 5 10\nVIA V1 5 10 ALL -1\nLAYER BOTTOM\nLINE 5 10 5 20\n$ENDROUTES\n`) }], {}, (b) => {
+  ok(b.layers.map((l) => l.id).join() === "TOP,BOTTOM", "gencad layers"); ok(b.traces.length === 2 && b.traces[0].net === "VCC" && Math.abs(b.traces[0].w - 10) < 0.01, "gencad track width " + (b.traces[0] || {}).w);
+  ok(b.vias.length === 1, "gencad via");
+});
+await t("Altium copper", [{ name: "ac.pcbdoc", bytes: enc("|RECORD=Board|KIND=Protel_Advanced_PCB|VERSION=5.0\n|RECORD=Component|ID=0|LAYER=TOP|X=1000mil|Y=1000mil|SOURCEDESIGNATOR=U3\n|RECORD=Pad|LAYER=TOP|NET=1|COMPONENT=0|NAME=1|X=1000mil|Y=1000mil|XSIZE=20mil|YSIZE=30mil\n|RECORD=Track|LAYER=TOP|NET=1|WIDTH=8mil|X1=1000mil|Y1=1000mil|X2=1200mil|Y2=1000mil\n|RECORD=Track|LAYER=MID1|NET=1|WIDTH=6mil|X1=1200mil|Y1=1000mil|X2=1200mil|Y2=1300mil\n|RECORD=Track|LAYER=BOTTOM|NET=0|WIDTH=10mil|X1=0mil|Y1=0mil|X2=10mil|Y2=0mil\n|RECORD=Via|X=1200mil|Y=1000mil|DIAMETER=20mil|NET=1\n|RECORD=Net|ID=0|NAME=GND\n|RECORD=Net|ID=1|NAME=VBUS\n") }], {}, (b) => {
+  ok(b.layers.map((l) => l.id).join() === "TOP,MID1,BOTTOM", "altium layers " + b.layers.map((l) => l.id)); ok(b.traces[0].net === "VBUS" && b.traces[0].w === 8, "altium track"); ok(b.vias[0].r === 10, "altium via");
+});
+await t("BRD has no copper", [{ name: "nc.brd", bytes: enc("str_length: 0\nvar_data: 4 1 2 0\nFormat:\n0 0\n10 0\n10 10\n0 10\nParts:\nU1 5 2\nPins:\n1 1 1 1 A\n2 2 2 1 B\n") }], {}, (b) => ok(!b.traces && !b.layers, "no copper on repair formats"));
 // ---- IPC-356
 {
   const L = ["P  JOB   TEST", "P  UNITS CUST 0", "P  NNAME1 VERY_LONG_NET_NAME_PP1V8"];

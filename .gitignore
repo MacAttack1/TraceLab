@@ -2,3 +2,4 @@ dist/
 installer/payload/*.exe
 *.log
 build/fzkey.secret
+build/caekey.secret

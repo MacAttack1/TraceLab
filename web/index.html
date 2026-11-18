@@ -9,36 +9,91 @@
 <style>
 /* Layout: one-screen bench. Inspector | board | schematic | assistant. Dark-first: solder-mask greens, copper accent. */
 :root{
-  --accent-base:#e39250; /* set by [data-accent]; drives the accent in both themes */
-  --bg:#0b1214; --rail:#10191c; --pane:#091013; --raise:#15232700; --line:#1f2f35; --line2:#2b4048;
-  --fg:#d5e0e2; --muted:#7f959a; --copper:var(--accent-base); --copper-ink:#161008; --copper-soft:color-mix(in srgb,var(--accent-base) 17%,transparent);
+  --accent-base:#e39250; /* set by [data-accent]; drives the accent in every theme */
+  --bg:#0b1214; --rail:#10191c; --pane:#091013; --line:#1f2f35; --line2:#2b4048; --fg:#d5e0e2; --muted:#7f959a;
+  --copper:var(--accent-base); --copper-ink:#161008; --copper-soft:color-mix(in srgb,var(--accent-base) 17%,transparent);
   --ok:#5fd29a; --warn:#e8c45a; --bad:#f07070;
-  --b-fill:#0e2427; --b-edge:#3d6b64; --b-part:#4b6e71; --b-pin:#b1bfc1; --b-gnd:#3a5056; --b-label:#9db4b6; --b-sel:#ffd39c; --b-pin-ink:#0a1315;
+  --b-bg:#030607; --b-fill:#0f302c; --b-edge:#58a596; --b-part:#5f8f8b; --b-pin:#c3d0d2; --b-gnd:#3b5459; --b-label:#a9c4c4; --b-sel:#ffd39c; --b-pin-ink:#0a1315;
   --n0:#f09c52; --n1:#4ccae2; --n2:#ef6aa8; --n3:#a6dc54; --n4:#b394ff; --n5:#ead95a; --n6:#5fe0a8;
   --ai-bg:#0d1619; --ai-user:#1a2a2f;
+  color-scheme:dark;
   --f-ui:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
   --f-head:"Segoe UI Variable Display","Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
   --f-mono:"Cascadia Mono","Cascadia Code",Consolas,"SF Mono",Menlo,ui-monospace,monospace;
-  color-scheme:dark;
 }
+/* System theme: follows Windows light/dark. Named themes set data-theme on <html>. */
 @media (prefers-color-scheme: light){
-  :root:not([data-theme="dark"]){
-    --bg:#e7eeed; --rail:#f6f9f8; --pane:#dce5e4; --line:#c6d4d3; --line2:#afc2c1;
-    --fg:#132024; --muted:#4f6468; --copper:color-mix(in srgb,var(--accent-base) 72%,#241300); --copper-ink:#fff6ee; --copper-soft:color-mix(in srgb,var(--accent-base) 20%,transparent);
+  :root:not([data-theme]){
+  --bg:#e7eeed; --rail:#f6f9f8; --pane:#dce5e4; --line:#c6d4d3; --line2:#afc2c1; --fg:#132024; --muted:#4f6468;
+    --copper:color-mix(in srgb,var(--accent-base) 72%,#241300); --copper-ink:#fff6ee; --copper-soft:color-mix(in srgb,var(--accent-base) 20%,transparent);
     --ok:#127a4c; --warn:#8a6a00; --bad:#b42727;
-    --b-fill:#cde0dc; --b-edge:#5a8d84; --b-part:#6b8c8d; --b-pin:#56676a; --b-gnd:#a7b9b8; --b-label:#2f4a49; --b-sel:#8a3a00; --b-pin-ink:#f2f7f6;
+    --b-bg:#aebdbb; --b-fill:#eef6f2; --b-edge:#2f6b5f; --b-part:#5d7f80; --b-pin:#4a5c60; --b-gnd:#a2b4b3; --b-label:#22403f; --b-sel:#a33f00; --b-pin-ink:#f2f7f6;
     --n0:#c45a10; --n1:#08869f; --n2:#c22c76; --n3:#4c8710; --n4:#6c4cd4; --n5:#977f00; --n6:#0f8458;
     --ai-bg:#f1f6f5; --ai-user:#dfe9e8;
     color-scheme:light;
   }
 }
+:root[data-theme="dark"]{
+  --bg:#0b1214; --rail:#10191c; --pane:#091013; --line:#1f2f35; --line2:#2b4048; --fg:#d5e0e2; --muted:#7f959a;
+  --copper:var(--accent-base); --copper-ink:#161008; --copper-soft:color-mix(in srgb,var(--accent-base) 17%,transparent);
+  --ok:#5fd29a; --warn:#e8c45a; --bad:#f07070;
+  --b-bg:#030607; --b-fill:#0f302c; --b-edge:#58a596; --b-part:#5f8f8b; --b-pin:#c3d0d2; --b-gnd:#3b5459; --b-label:#a9c4c4; --b-sel:#ffd39c; --b-pin-ink:#0a1315;
+  --n0:#f09c52; --n1:#4ccae2; --n2:#ef6aa8; --n3:#a6dc54; --n4:#b394ff; --n5:#ead95a; --n6:#5fe0a8;
+  --ai-bg:#0d1619; --ai-user:#1a2a2f;
+  color-scheme:dark;
+}
 :root[data-theme="light"]{
-  --bg:#e7eeed; --rail:#f6f9f8; --pane:#dce5e4; --line:#c6d4d3; --line2:#afc2c1;
-  --fg:#132024; --muted:#4f6468; --copper:color-mix(in srgb,var(--accent-base) 72%,#241300); --copper-ink:#fff6ee; --copper-soft:color-mix(in srgb,var(--accent-base) 20%,transparent);
+  --bg:#e7eeed; --rail:#f6f9f8; --pane:#dce5e4; --line:#c6d4d3; --line2:#afc2c1; --fg:#132024; --muted:#4f6468;
+  --copper:color-mix(in srgb,var(--accent-base) 72%,#241300); --copper-ink:#fff6ee; --copper-soft:color-mix(in srgb,var(--accent-base) 20%,transparent);
   --ok:#127a4c; --warn:#8a6a00; --bad:#b42727;
-  --b-fill:#cde0dc; --b-edge:#5a8d84; --b-part:#6b8c8d; --b-pin:#56676a; --b-gnd:#a7b9b8; --b-label:#2f4a49; --b-sel:#8a3a00; --b-pin-ink:#f2f7f6;
+  --b-bg:#aebdbb; --b-fill:#eef6f2; --b-edge:#2f6b5f; --b-part:#5d7f80; --b-pin:#4a5c60; --b-gnd:#a2b4b3; --b-label:#22403f; --b-sel:#a33f00; --b-pin-ink:#f2f7f6;
   --n0:#c45a10; --n1:#08869f; --n2:#c22c76; --n3:#4c8710; --n4:#6c4cd4; --n5:#977f00; --n6:#0f8458;
   --ai-bg:#f1f6f5; --ai-user:#dfe9e8;
+  color-scheme:light;
+}
+:root[data-theme="midnight"]{
+  --bg:#0a0f1f; --rail:#0f1630; --pane:#080c19; --line:#1c2649; --line2:#2b3a6a; --fg:#dbe3ff; --muted:#8392c4;
+  --copper:var(--accent-base); --copper-ink:#161008; --copper-soft:color-mix(in srgb,var(--accent-base) 17%,transparent);
+  --ok:#5fd29a; --warn:#e8c45a; --bad:#f07070;
+  --b-bg:#02040b; --b-fill:#0f2252; --b-edge:#7096f0; --b-part:#6b80bd; --b-pin:#dbe2f7; --b-gnd:#38466f; --b-label:#b6c4f0; --b-sel:#ffd38a; --b-pin-ink:#0a0f1f;
+  --n0:#ffa45c; --n1:#55d4ff; --n2:#ff6fb5; --n3:#b2e65c; --n4:#c4a2ff; --n5:#f2e15f; --n6:#62f0b6;
+  --ai-bg:#0c1328; --ai-user:#18224a;
+  color-scheme:dark;
+}
+:root[data-theme="graphite"]{
+  --bg:#141517; --rail:#1b1c1f; --pane:#111214; --line:#2a2c30; --line2:#3b3e44; --fg:#e3e4e6; --muted:#9b9ea4;
+  --copper:var(--accent-base); --copper-ink:#161008; --copper-soft:color-mix(in srgb,var(--accent-base) 17%,transparent);
+  --ok:#5fd29a; --warn:#e8c45a; --bad:#f07070;
+  --b-bg:#060607; --b-fill:#1f2924; --b-edge:#93ad9f; --b-part:#7d8a84; --b-pin:#d6d9dc; --b-gnd:#454a4e; --b-label:#c3cbc7; --b-sel:#ffcf6e; --b-pin-ink:#111214;
+  --n0:#f5a05a; --n1:#5ccbe6; --n2:#f07bb2; --n3:#aedd60; --n4:#b9a0ff; --n5:#ecd860; --n6:#66e0ad;
+  --ai-bg:#17181b; --ai-user:#25272b;
+  color-scheme:dark;
+}
+:root[data-theme="oled"]{
+  --bg:#000000; --rail:#070707; --pane:#000000; --line:#171717; --line2:#2a2a2a; --fg:#e9e9e9; --muted:#8c8c8c;
+  --copper:var(--accent-base); --copper-ink:#161008; --copper-soft:color-mix(in srgb,var(--accent-base) 17%,transparent);
+  --ok:#5fd29a; --warn:#e8c45a; --bad:#f07070;
+  --b-bg:#000000; --b-fill:#0a1d16; --b-edge:#4fc493; --b-part:#4f7466; --b-pin:#e6e6e6; --b-gnd:#3a3a3a; --b-label:#d0d0d0; --b-sel:#ffd000; --b-pin-ink:#000000;
+  --n0:#ff9a45; --n1:#3fd2f5; --n2:#ff5ca8; --n3:#a8e84a; --n4:#b799ff; --n5:#f5e04a; --n6:#4ff0ac;
+  --ai-bg:#050505; --ai-user:#151515;
+  color-scheme:dark;
+}
+:root[data-theme="contrast"]{
+  --bg:#000000; --rail:#0a0a0a; --pane:#000000; --line:#5a5a5a; --line2:#9a9a9a; --fg:#ffffff; --muted:#d0d0d0;
+  --copper:var(--accent-base); --copper-ink:#161008; --copper-soft:color-mix(in srgb,var(--accent-base) 17%,transparent);
+  --ok:#3dff9a; --warn:#ffe14d; --bad:#ff5c5c;
+  --b-bg:#000000; --b-fill:#003d20; --b-edge:#00ff9c; --b-part:#ffffff; --b-pin:#ffff00; --b-gnd:#8a8a8a; --b-label:#ffffff; --b-sel:#ff3dff; --b-pin-ink:#000000;
+  --n0:#ff8c00; --n1:#00e5ff; --n2:#ff2fa0; --n3:#9dff00; --n4:#c58bff; --n5:#ffff3a; --n6:#00ff9c;
+  --ai-bg:#000000; --ai-user:#1d1d1d;
+  color-scheme:dark;
+}
+:root[data-theme="paper"]{
+  --bg:#f1ede4; --rail:#fbf8f1; --pane:#e7e0d2; --line:#d9cfbd; --line2:#c2b6a0; --fg:#2b241e; --muted:#6c6052;
+  --copper:color-mix(in srgb,var(--accent-base) 72%,#241300); --copper-ink:#fff6ee; --copper-soft:color-mix(in srgb,var(--accent-base) 20%,transparent);
+  --ok:#127a4c; --warn:#8a6a00; --bad:#b42727;
+  --b-bg:#c7bba5; --b-fill:#fbf9f3; --b-edge:#6e4f2e; --b-part:#8f7e66; --b-pin:#9a6a22; --b-gnd:#b9ad98; --b-label:#3b3026; --b-sel:#c2410c; --b-pin-ink:#ffffff;
+  --n0:#c2570c; --n1:#0b7f98; --n2:#b8286e; --n3:#4b7f0f; --n4:#6a47c9; --n5:#8d7300; --n6:#0d7f53;
+  --ai-bg:#f6f2ea; --ai-user:#e8e0d0;
   color-scheme:light;
 }
 :root[data-accent="amber"]{--accent-base:#e6b325}
@@ -92,6 +147,25 @@ dialog.wide{width:min(1000px,96vw)}
 .dbt tr.lib{cursor:pointer}
 .dbt tr.lib:hover td{background:var(--line)}
 .dbt tr.lib td:first-child{font-family:var(--f-mono)}
+.layers-pop{position:absolute;z-index:30;right:8px;top:46px;width:min(380px,92%);max-height:70vh;overflow:auto;background:var(--rail);border:1px solid var(--line2);border-radius:9px;box-shadow:0 14px 40px rgba(0,0,0,.45);padding:12px;display:flex;flex-direction:column;gap:8px}
+.pane{position:relative}
+.lp-h{font:600 13px var(--f-head);display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.lp-list{display:flex;flex-direction:column;gap:2px;border-top:1px solid var(--line);padding-top:6px}
+.lp-row{display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:5px}
+.lp-row:hover{background:var(--line)}
+.lp-row input[type=checkbox]{accent-color:var(--copper)}
+.lp-row input[type=color],.bcolors input[type=color]{width:26px;height:22px;border:1px solid var(--line2);border-radius:4px;padding:0;background:none;cursor:pointer}
+.lp-n{flex:1;min-width:0;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lp-only{height:22px;padding:0 7px;font-size:11px}
+.themes{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+.themes button{display:flex;flex-direction:column;gap:6px;align-items:stretch;padding:6px;border:1.5px solid var(--line2);border-radius:8px;background:var(--bg);cursor:pointer;font-size:12px;color:var(--fg);text-align:left}
+.themes button[aria-pressed="true"]{border-color:var(--copper);box-shadow:0 0 0 2px var(--copper-soft)}
+.themes .pv{height:44px;border-radius:5px;display:grid;grid-template-columns:18% 1fr;overflow:hidden;border:1px solid rgba(128,128,128,.25)}
+.themes .pv i{display:block}
+.themes .pv .bd{display:flex;align-items:center;justify-content:center}
+.themes .pv .bd b{display:block;width:62%;height:56%;border-radius:2px}
+.bcolors{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px 12px;margin-top:6px}
+.bcolors label{display:flex;align-items:center;gap:8px;font-size:12.5px}
 .tour-hole{position:fixed;z-index:80;border-radius:8px;box-shadow:0 0 0 9999px rgba(4,10,12,.66);outline:2px solid var(--copper);pointer-events:none;transition:all .2s}
 .tour-card{position:fixed;z-index:81;width:min(380px,92vw);background:var(--rail);color:var(--fg);border:1px solid var(--line2);border-radius:10px;box-shadow:0 18px 50px rgba(0,0,0,.5);padding:16px 18px}
 .tour-card h3{margin:0 0 6px;font:600 16px var(--f-head)}
@@ -208,6 +282,14 @@ table.pins .g{color:var(--muted)}
 .flux-h .who{display:flex;flex-direction:column;line-height:1.15;min-width:0;flex:1}
 .flux-h .who b{font:600 15px var(--f-head)}
 .flux-h .who span{font:11.5px var(--f-mono);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msel{max-width:100%;border:1px solid transparent;border-radius:5px;background:transparent;color:var(--muted);font:11.5px var(--f-mono);padding:1px 2px;margin-left:-3px;cursor:pointer;text-overflow:ellipsis}
+.msel:hover,.msel:focus{border-color:var(--line2);color:var(--fg);background:var(--bg)}
+.msel option,.msel optgroup{color:var(--fg);background:var(--rail)}
+.extl{display:flex;flex-direction:column;gap:4px;margin:4px 0}
+.extr{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:7px;padding:7px 10px;background:var(--bg)}
+.extr .t{flex:1;min-width:0}
+.extr .t b{display:block;font:600 12.5px var(--f-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.extr .t span{font-size:12px;color:var(--muted)}
 .flux-av{width:32px;height:32px;border-radius:50%;flex:none;display:grid;place-items:center;background:radial-gradient(circle at 35% 30%,color-mix(in srgb,var(--copper) 55%,#fff) 0,var(--copper) 55%,color-mix(in srgb,var(--copper) 60%,#000) 100%);color:var(--copper-ink);box-shadow:0 0 0 3px var(--copper-soft)}
 .flux-av svg{width:18px;height:18px}
 .iconbtn{width:30px;height:30px;border:1px solid transparent;border-radius:6px;background:none;cursor:pointer;display:grid;place-items:center;color:var(--muted)}
@@ -410,8 +492,7 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
   </nav>
   <div class="spacer"></div>
   <button class="tbtn upd" id="updBtn" hidden></button>
-  <button class="tbtn gear" id="settingsBtn" title="Settings">
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" stroke-linecap="round"/></svg>Settings</button>
+
 
   <div class="dropdown" id="menu-file" role="menu" hidden>
     <button role="menuitem" data-cmd="open-board">Open boardview…<span class="acc">Ctrl+O</span></button>
@@ -422,6 +503,7 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
     <div id="recentMenu" style="display:contents"></div>
     <div class="sep"></div>
     <button role="menuitem" data-cmd="open-db">Readings database…</button>
+    <button role="menuitem" data-cmd="settings">Settings…<span class="acc">Ctrl+,</span></button>
     <div class="sep"></div>
     <button role="menuitem" data-cmd="reload">Reload</button>
     <button role="menuitem" data-cmd="exit">Exit</button>
@@ -439,9 +521,7 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
     <button role="menuitem" data-cmd="airwires">Show airwires</button>
     <div class="sep"></div>
     <div class="mlabel">Theme</div>
-    <button role="menuitem" data-cmd="theme-system">System</button>
-    <button role="menuitem" data-cmd="theme-light">Light</button>
-    <button role="menuitem" data-cmd="theme-dark">Dark</button>
+    <div id="themeMenu" style="display:contents"></div>
   </div>
   <div class="dropdown" id="menu-assistant" role="menu" hidden>
     <button role="menuitem" data-cmd="ai-toggle">Chat with Flux<span class="acc">A</span></button>
@@ -470,8 +550,6 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
   </div>
 </header>
 <div class="toolbar">
-  <button class="filebtn" id="tbOpenBoard">Open boardview</button>
-  <button class="filebtn" id="tbOpenSch">Open schematic</button>
   <button class="filebtn" id="tbLibrary" title="Your boardview and schematic folders (Ctrl+L)">Library</button>
   <div class="search">
     <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Find net or part  ( / )" aria-label="Find net or part">
@@ -494,10 +572,11 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
     <div class="pane-h">
       <span class="pt">Board</span><span class="fname" id="boardName"></span>
       <div class="seg" id="sideSeg" role="group" aria-label="Board side"><button data-s="T" aria-pressed="true">Top</button><button data-s="B" aria-pressed="false">Bottom</button></div>
+      <button class="btn" id="layersBtn" hidden title="Choose which copper layers to show">Layers</button>
       <label class="chk"><input type="checkbox" id="airw" checked>Airwires</label>
       <button class="btn" id="fitB">Fit</button>
     </div>
-    <div class="cw" id="bwrap"><canvas id="bc"></canvas><div class="tip" id="btip" hidden></div><div class="prog" id="bprog" hidden></div></div>
+    <div class="layers-pop" id="layersPop" hidden></div><div class="cw" id="bwrap"><canvas id="bc"></canvas><div class="tip" id="btip" hidden></div><div class="prog" id="bprog" hidden></div></div>
   </section>
 
   <section class="pane" id="schPane" aria-label="Schematic">
@@ -520,7 +599,7 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
 <section class="flux" id="aiPane" aria-label="Flux repair assistant" hidden>
   <div class="flux-h" id="aiHead">
     <span class="flux-av"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 2.5L5 13.5h6l-1.5 8 8.5-11h-6z" fill="currentColor" stroke-width="1.2"/></svg></span>
-    <div class="who"><b>Flux</b><span id="aiModel"></span></div>
+    <div class="who"><b>Flux</b><select id="aiModelSel" class="msel" aria-label="AI model Flux uses" title="Switch the AI model Flux uses"></select></div>
     <button class="btn" id="aiGuide" title="Flux asks you to probe points and diagnoses from your readings">Guided</button>
     <button class="btn" id="aiNew" title="Start a new conversation">New chat</button>
     <button class="iconbtn" id="aiMin" title="Minimise (A)" aria-label="Minimise Flux"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3.5 8h9"/></svg></button>
@@ -570,6 +649,11 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
   <div class="dlg-h">Offline AI<span class="spacer"></span><span class="foot" id="alServer"></span></div>
   <div class="dlg-b">
     <div id="alChoice"><p class="foot">Checking this PC…</p></div>
+    <div class="dlg-sec">Models already on this PC</div>
+    <div class="field"><small>Trace Lab also runs GGUF models you already have from LM Studio, Ollama or any folder, without downloading them again.</small>
+      <div id="alExt"></div>
+      <div class="row2"><button class="btn" type="button" id="alAddDir">Add a folder…</button><button class="btn" type="button" id="alRescan">Look again</button></div>
+      <small id="alDirs"></small></div>
     <div class="field"><span>Folder for AI models</span>
       <div class="row2"><input id="alDir" spellcheck="false" style="flex:1;min-width:0"><button class="btn" type="button" id="alDirPick">Browse…</button><button class="btn" type="button" id="alDirSave">Use this folder</button><button class="btn" type="button" id="alReveal">Show in Explorer</button></div>
       <small id="alFree"></small></div>
@@ -637,11 +721,8 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
       </div>
 
       <div class="dlg-sec">Appearance</div>
-      <label class="field"><span>Theme</span>
-        <div class="seg" id="sThemeSeg" role="group" aria-label="Theme">
-          <button type="button" data-mode="system" aria-pressed="true">System</button>
-          <button type="button" data-mode="light" aria-pressed="false">Light</button>
-          <button type="button" data-mode="dark" aria-pressed="false">Dark</button></div></label>
+      <div class="field"><span>Theme</span>
+        <div class="themes" id="sThemes" role="radiogroup" aria-label="Theme"></div></div>
       <label class="field"><span>Accent colour</span>
         <div class="swatches" id="sAccent">
           <button type="button" class="sw" data-accent="copper" title="Copper" style="--s:#e39250"></button>
@@ -651,6 +732,12 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
           <button type="button" class="sw" data-accent="green" title="Green" style="--s:#5bbf6a"></button>
           <button type="button" class="sw" data-accent="violet" title="Violet" style="--s:#9a86ff"></button>
           <button type="button" class="sw" data-accent="rose" title="Rose" style="--s:#ec6a92"></button></div></label>
+
+      <div class="dlg-sec">Board colours</div>
+      <div class="field"><span>Colour scheme for the board view</span>
+        <div class="row2"><select id="sBoardPreset" style="flex:1;min-width:0"></select><button class="btn" type="button" id="sBoardReset">Reset</button></div>
+        <div class="bcolors" id="sBoardColors"></div>
+        <small>Changes show on the board straight away. Pick “Theme default” to follow the theme.</small></div>
 
       <div class="dlg-sec">Readings database</div>
       <label class="field"><span>Where to keep your saved readings</span>

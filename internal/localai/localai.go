@@ -50,22 +50,22 @@ type Model struct {
 }
 
 var Catalog = []Model{
-	{ID: "gemma4-e2b", Name: "Gemma 4 E2B · Compact", Repo: "ggml-org/gemma-4-E2B-it-GGUF", Quant: "Q4_K_M", Params: "2B effective", ApproxGB: 3.5, NeedGB: 4.5,
+	{ID: "gemma4-e2b", Name: "Gemma 4 E2B · Compact", Repo: "ggml-org/gemma-4-E2B-it-GGUF", Quant: "Q4_0", Params: "2B effective", ApproxGB: 3.5, NeedGB: 4.5,
 		Summary: "The smallest and quickest. Runs on almost any PC, even without a graphics card.",
 		Best:    "Older or thin laptops, PCs with 8 GB of RAM, or when you want instant answers.",
 		Pros:    []string{"Starts fast and answers fast", "Works on CPU only", "Smallest download"},
 		Cons:    []string{"Loses track more often on long, multi-step diagnoses", "Weaker at reading dense schematics"}},
-	{ID: "gemma4-e4b", Name: "Gemma 4 E4B · Balanced", Repo: "ggml-org/gemma-4-E4B-it-GGUF", Quant: "Q4_K_M", Params: "4B effective", ApproxGB: 5.5, NeedGB: 6.5,
+	{ID: "gemma4-e4b", Name: "Gemma 4 E4B · Balanced", Repo: "ggml-org/gemma-4-E4B-it-GGUF", Quant: "Q4_0", Params: "4B effective", ApproxGB: 5.5, NeedGB: 6.5,
 		Summary: "The best all-rounder for most repair benches.",
 		Best:    "Any graphics card with 6 GB or more, or a laptop with 16 GB of RAM.",
 		Pros:    []string{"Fast on most graphics cards", "Follows guided diagnosis well for common faults", "Reads schematic pages and scope screens"},
 		Cons:    []string{"Can miss subtle details in complex power sequencing"}},
-	{ID: "gemma4-26b", Name: "Gemma 4 26B-A4B · Smart and quick", Repo: "ggml-org/gemma-4-26B-A4B-it-GGUF", Quant: "Q4_K_M", Params: "26B (4B active)", ApproxGB: 17, NeedGB: 18.5, MoE: true,
+	{ID: "gemma4-26b", Name: "Gemma 4 26B-A4B · Smart and quick", Repo: "ggml-org/gemma-4-26B-A4B-it-GGUF", Quant: "Q4_0", Params: "26B (4B active)", ApproxGB: 17, NeedGB: 18.5, MoE: true,
 		Summary: "Close to top quality while staying quick. It's a \"mixture of experts\" model that uses only about 4B of its 26B parameters for each word, so it stays usable even when part of it has to run from system RAM.",
 		Best:    "Graphics cards with 12 to 16 GB, or PCs with 32 GB of RAM or more.",
 		Pros:    []string{"Much better at tracing enable chains and multi-step fault-finding", "Still fast when it doesn't fully fit in graphics memory"},
 		Cons:    []string{"Large download", "Needs plenty of memory"}},
-	{ID: "gemma4-31b", Name: "Gemma 4 31B · Best quality", Repo: "ggml-org/gemma-4-31B-it-GGUF", Quant: "Q4_K_M", Params: "31B", ApproxGB: 20, NeedGB: 21.5,
+	{ID: "gemma4-31b", Name: "Gemma 4 31B · Best quality", Repo: "ggml-org/gemma-4-31B-it-GGUF", Quant: "Q4_0", Params: "31B", ApproxGB: 20, NeedGB: 21.5,
 		Summary: "The strongest model that runs offline. Best at reasoning through complex power sequencing and dense schematics.",
 		Best:    "A 24 GB graphics card (RTX 3090, 4090 or 5090, Radeon RX 7900 XTX).",
 		Pros:    []string{"Highest-quality diagnosis offline", "Best schematic reading"},
@@ -197,7 +197,8 @@ type Progress struct {
 }
 
 type Manager struct {
-	Dir string // where engines and models are kept
+	Dir       string   // where engines and models are kept
+	ExtraDirs []string // more folders to look for GGUF models in (besides LM Studio and Ollama)
 
 	mu     sync.Mutex
 	prog   Progress
@@ -263,17 +264,87 @@ func (m *Manager) EngineInstalled(v string) (engineInfo, bool) {
 			return e, true
 		}
 	}
+	// The folder moved (or the manifest is missing): find llama-server in the engine folder itself.
+	if exe := findFile(m.engineDir(v), serverExe()); exe != "" {
+		e.Variant, e.Exe = v, exe
+		_ = writeJSON(filepath.Join(m.engineDir(v), "engine.json"), e)
+		return e, true
+	}
 	return e, false
+}
+
+// isAuxFile spots GGUF files that ship beside a model but can't be loaded as one.
+func isAuxFile(name string) bool {
+	n := strings.ToLower(filepath.Base(name))
+	for _, p := range []string{"mtp-", "mtp_", "draft", "dflash", "imatrix", "eagle"} {
+		if strings.HasPrefix(n, p) || strings.Contains(n, "-"+p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) ModelInstalled(id string) (modelInfo, bool) {
 	var mi modelInfo
+	if strings.HasPrefix(id, "ext:") { // a model file from LM Studio, Ollama or a folder of the user's
+		e, ok := m.FindExternal(id)
+		if !ok {
+			return mi, false
+		}
+		return modelInfo{ID: id, Model: e.Path, Vision: e.Vision, Bytes: e.Bytes}, true
+	}
 	if !readJSON(filepath.Join(m.modelDir(id), "model.json"), &mi) {
+		// Files are there but the manifest isn't (an interrupted earlier download, an older version, or
+		// files copied in by hand): recognise a complete model file and write the manifest again.
+		if r, ok := m.recoverModel(id); ok {
+			return r, true
+		}
+		return mi, false
+	}
+	if isAuxFile(mi.Model) { // fetched by Trace Lab 1.5.0/1.5.1 by mistake: download the real model
 		return mi, false
 	}
 	if _, err := os.Stat(filepath.Join(m.modelDir(id), mi.Model)); err != nil {
 		return mi, false
 	}
+	return mi, true
+}
+
+func (m *Manager) recoverModel(id string) (modelInfo, bool) {
+	dir := m.modelDir(id)
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return modelInfo{}, false
+	}
+	var model, vision string
+	var bytes int64
+	for _, e := range ents {
+		n := strings.ToLower(e.Name())
+		if e.IsDir() || !strings.HasSuffix(n, ".gguf") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		switch {
+		case strings.Contains(n, "mmproj"):
+			if vision == "" || strings.Contains(n, "q8_0") {
+				vision = e.Name()
+			}
+		case isAuxFile(n):
+		case info.Size() >= 100<<20 && info.Size() > bytes:
+			model, bytes = e.Name(), info.Size()
+		}
+	}
+	if model == "" {
+		return modelInfo{}, false
+	}
+	mi := modelInfo{ID: id, Model: model, Vision: vision, Bytes: bytes, Fetched: time.Now().Unix()}
+	if mod := ModelByID(id); mod != nil {
+		mi.Repo = mod.Repo
+	}
+	_ = writeJSON(filepath.Join(dir, "model.json"), mi)
 	return mi, true
 }
 
@@ -603,9 +674,13 @@ func ResolveFiles(ctx context.Context, mod Model) (model, vision hfFile, err err
 		if f.Type != "file" || !strings.HasSuffix(n, ".gguf") {
 			continue
 		}
-		if strings.Contains(n, "mmproj") {
+		base := filepath.Base(n)
+		switch {
+		case strings.Contains(base, "mmproj"):
 			mm = append(mm, f)
-		} else {
+		case isAuxFile(base):
+			// draft / multi-token-prediction heads (e.g. mtp-gemma-4-E4B-it-Q4_0.gguf) aren't models on their own
+		default:
 			ggufs = append(ggufs, f)
 		}
 	}
@@ -615,7 +690,7 @@ func ResolveFiles(ctx context.Context, mod Model) (model, vision hfFile, err err
 	sort.Slice(ggufs, func(i, j int) bool { return ggufs[i].size() < ggufs[j].size() })
 	model = ggufs[0]
 	found := false
-	for _, q := range []string{mod.Quant, "Q4_K_M", "Q4_K", "Q4_0", "Q5_K_M", "Q8_0"} {
+	for _, q := range []string{mod.Quant, "Q4_K_M", "Q4_0", "Q4_K", "Q5_K_M", "Q8_0"} {
 		for _, f := range ggufs {
 			if strings.Contains(strings.ToUpper(f.Path), strings.ToUpper(q)) {
 				model, found = f, true
@@ -629,10 +704,13 @@ func ResolveFiles(ctx context.Context, mod Model) (model, vision hfFile, err err
 	if len(mm) > 0 {
 		sort.Slice(mm, func(i, j int) bool { return mm[i].size() < mm[j].size() })
 		vision = mm[0]
-		for _, f := range mm {
-			if strings.Contains(strings.ToLower(f.Path), "f16") {
-				vision = f
-				break
+	pick: // Q8_0 reads images as well as F16/BF16 at about half the size
+		for _, want := range []string{"q8_0", "f16"} {
+			for _, f := range mm {
+				if strings.Contains(strings.ToLower(f.Path), want) {
+					vision = f
+					break pick
+				}
 			}
 		}
 	}
@@ -689,6 +767,14 @@ func (m *Manager) fetchModel(ctx context.Context, mod Model) error {
 		vision = filepath.Base(vf.Path)
 		if err := m.fetchFile(ctx, url(vf), filepath.Join(dir, vision), vf.size(), sha(vf), "vision", "Downloading the image reader for "+mod.Name); err != nil {
 			return err
+		}
+	}
+	keep := map[string]bool{strings.ToLower(filepath.Base(mf.Path)): true, strings.ToLower(vision): true}
+	if ents, err := os.ReadDir(dir); err == nil { // drop files from an earlier, different pick
+		for _, e := range ents {
+			if n := strings.ToLower(e.Name()); strings.HasSuffix(n, ".gguf") && !keep[n] {
+				_ = os.Remove(filepath.Join(dir, e.Name()))
+			}
 		}
 	}
 	return writeJSON(filepath.Join(dir, "model.json"), modelInfo{ID: mod.ID, Repo: mod.Repo, Model: filepath.Base(mf.Path), Vision: vision, Bytes: mf.size() + vf.size(), Fetched: time.Now().Unix()})
@@ -778,6 +864,9 @@ func (m *Manager) fetchFile(ctx context.Context, url, dst string, size int64, sh
 
 // Remove deletes a downloaded model (and stops the server if it's using it).
 func (m *Manager) Remove(id string) error {
+	if strings.HasPrefix(id, "ext:") {
+		return errors.New("this model belongs to another app or folder; Trace Lab doesn't delete it")
+	}
 	m.mu.Lock()
 	s := m.srv
 	m.mu.Unlock()

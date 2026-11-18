@@ -179,15 +179,21 @@ func (m *Manager) Ensure(modelID, variant string, ctxSize int) (string, error) {
 
 func (m *Manager) start(eng engineInfo, mi modelInfo, variant string, ctxSize int, cpu bool) (*server, error) {
 	dir := m.modelDir(mi.ID)
+	abs := func(f string) string {
+		if filepath.IsAbs(f) {
+			return f
+		}
+		return filepath.Join(dir, f)
+	}
 	port := freePort()
 	ngl := "999"
 	if cpu {
 		ngl = "0"
 	}
-	args := []string{"-m", filepath.Join(dir, mi.Model), "--jinja", "-ngl", ngl, "-c", strconv.Itoa(ctxSize),
-		"--host", "127.0.0.1", "--port", strconv.Itoa(port), "--alias", mi.ID}
+	args := []string{"-m", abs(mi.Model), "--jinja", "-ngl", ngl, "-c", strconv.Itoa(ctxSize),
+		"--host", "127.0.0.1", "--port", strconv.Itoa(port), "--alias", strings.ReplaceAll(mi.ID, ":", "-")}
 	if mi.Vision != "" {
-		args = append(args, "--mmproj", filepath.Join(dir, mi.Vision))
+		args = append(args, "--mmproj", abs(mi.Vision))
 	}
 	cmd := exec.Command(eng.Exe, args...)
 	cmd.Dir = filepath.Dir(eng.Exe)
@@ -238,7 +244,7 @@ func (s *server) waitReady(max time.Duration) error {
 		case <-s.done:
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			return fmt.Errorf("%s. %s", s.err, lastLine(s.log.String()))
+			return fmt.Errorf("%s. %s", s.err, explain(s.log.String()))
 		case <-time.After(400 * time.Millisecond):
 		}
 		r, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/health", s.port))
@@ -253,6 +259,36 @@ func (s *server) waitReady(max time.Duration) error {
 		}
 	}
 	return errors.New("the AI model took too long to load")
+}
+
+// explain picks the lines of the engine's log that say what went wrong, plus a plain-language hint.
+func explain(log string) string {
+	var hits []string
+	for _, l := range strings.Split(log, "\n") {
+		l = strings.TrimSpace(l)
+		ll := strings.ToLower(l)
+		if strings.Contains(ll, "error") || strings.Contains(ll, "failed") || strings.Contains(ll, "unknown") || strings.Contains(ll, "out of memory") || strings.Contains(ll, "not enough") {
+			if i := strings.Index(l, " E "); i >= 0 && i < 20 { // drop llama.cpp's "0.01.312.831 E " prefix
+				l = l[i+3:]
+			}
+			hits = append(hits, l)
+		}
+	}
+	if len(hits) > 3 {
+		hits = hits[len(hits)-3:]
+	}
+	msg := strings.Join(hits, " / ")
+	if msg == "" {
+		msg = lastLine(log)
+	}
+	ll := strings.ToLower(msg)
+	switch {
+	case strings.Contains(ll, "unknown model architecture") || strings.Contains(ll, "unknown architecture"):
+		msg += " (the AI engine is older than this model: delete the engine folder in the models folder and Trace Lab downloads a newer one)"
+	case strings.Contains(ll, "out of memory") || strings.Contains(ll, "failed to allocate") || strings.Contains(ll, "not enough"):
+		msg += " (not enough memory: choose a smaller model in Settings → Offline AI)"
+	}
+	return msg
 }
 
 func lastLine(s string) string {
