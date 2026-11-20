@@ -517,6 +517,7 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
     <div class="sep"></div>
     <button role="menuitem" data-cmd="side-top">Top side</button>
     <button role="menuitem" data-cmd="side-bottom">Bottom side<span class="acc">B</span></button>
+    <button role="menuitem" data-cmd="side-fly">Butterfly (both sides)<span class="acc">Y</span></button>
     <button role="menuitem" data-cmd="fit">Fit to window<span class="acc">F</span></button>
     <button role="menuitem" data-cmd="airwires">Show airwires</button>
     <div class="sep"></div>
@@ -571,7 +572,7 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
   <section class="pane" id="boardPane" aria-label="Board">
     <div class="pane-h">
       <span class="pt">Board</span><span class="fname" id="boardName"></span>
-      <div class="seg" id="sideSeg" role="group" aria-label="Board side"><button data-s="T" aria-pressed="true">Top</button><button data-s="B" aria-pressed="false">Bottom</button></div>
+      <div class="seg" id="sideSeg" role="group" aria-label="Board side"><button data-s="T" aria-pressed="true">Top</button><button data-s="B" aria-pressed="false">Bottom</button><button data-s="X" aria-pressed="false" title="Butterfly: top and bottom side by side, the bottom mirrored like an opened book (Y)">Butterfly</button></div>
       <button class="btn" id="layersBtn" hidden title="Choose which copper layers to show">Layers</button>
       <label class="chk"><input type="checkbox" id="airw" checked>Airwires</label>
       <button class="btn" id="fitB">Fit</button>

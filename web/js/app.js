@@ -31,7 +31,7 @@ async function getPdf() {
 }
 
 /* ---------------- state ---------------- */
-export const S = { board: null, sch: null, sel: null, pinSel: -1, side: "T", airwires: true, depth: 2, caps: false, layout: "split", copper: { traces: true, zones: true, vias: true },
+export const S = { fly: (() => { try { return localStorage.getItem("tl.fly") === "1"; } catch (e) { return false; } })(), board: null, sch: null, sel: null, pinSel: -1, side: "T", airwires: true, depth: 2, caps: false, layout: "split", copper: { traces: true, zones: true, vias: true },
   tree: [], hl: new Map(), hlSch: new Map(), hitCursor: 0, hoverTok: null, lastError: null };
 const bv = { scale: 1, ox: 0, oy: 0, fit: 1 };
 const sv = { page: 0, zoom: 1, ox: 0, oy: 0, fit: 1 };
@@ -206,8 +206,8 @@ function buildGrid(b, side) {
   b.pins.forEach((p, i) => { if (!vis(b, p, side)) return; const k = Math.floor(p.x / C) + "," + Math.floor(p.y / C); if (!g.has(k)) g.set(k, []); g.get(k).push(i); });
   return g;
 }
-function hitPin(x, y, tol) {
-  const b = S.board; const g = b.grid[S.side]; const C = b.cell; const cx = Math.floor(x / C), cy = Math.floor(y / C);
+function hitPin(x, y, tol, side = S.side) {
+  const b = S.board; const g = b.grid[side]; const C = b.cell; const cx = Math.floor(x / C), cy = Math.floor(y / C);
   const reach = Math.min(6, Math.max(1, Math.ceil(tol / C))); let best = -1, bd = Infinity;
   for (let i = -reach; i <= reach; i++) for (let j = -reach; j <= reach; j++) {
     const a = g.get((cx + i) + "," + (cy + j)); if (!a) continue;
@@ -215,9 +215,9 @@ function hitPin(x, y, tol) {
   }
   return best;
 }
-function hitPart(x, y) {
+function hitPart(x, y, side = S.side) {
   const b = S.board; let best = -1, ba = Infinity;
-  b.parts.forEach((p, i) => { if (p.nail || !(p.side === S.side || p.side === "BOTH")) return; const q = p.bb; if (x >= q[0] && x <= q[2] && y >= q[1] && y <= q[3]) { const a = (q[2] - q[0]) * (q[3] - q[1]); if (a < ba) { ba = a; best = i; } } });
+  b.parts.forEach((p, i) => { if (p.nail || !(p.side === side || p.side === "BOTH")) return; const q = p.bb; if (x >= q[0] && x <= q[2] && y >= q[1] && y <= q[3]) { const a = (q[2] - q[0]) * (q[3] - q[1]); if (a < ba) { ba = a; best = i; } } });
   return best;
 }
 
@@ -291,18 +291,33 @@ function refreshTree() { if (S.sel && S.sel.type === "net") select(S.sel, { focu
 
 /* ---------------- board view ---------------- */
 const bc = $("#bc"), bwrap = $("#bwrap"), btip = $("#btip");
-const mir = () => (S.side === "B" ? -1 : 1);
-const b2s = (x, y) => [x * bv.scale * mir() + bv.ox, -y * bv.scale + bv.oy];
-const s2b = (sx, sy) => [(sx - bv.ox) / (bv.scale * mir()), -(sy - bv.oy) / bv.scale];
+// Butterfly mode shows both sides at once: top in the left half, bottom in the right half mirrored
+// about the centre line, as if the board were opened like a book. Both halves pan and zoom together;
+// bv.ox is always in top-side terms then, and the right half is its mirror image.
+const fly = () => !!(S.fly && S.board);
+export const isButterfly = () => fly();
+const mir = () => (!fly() && S.side === "B" ? -1 : 1);
+const paneX = (side) => (fly() && side === "B" ? { m: -1, o: bwrap.clientWidth - bv.ox } : { m: side === "B" ? -1 : 1, o: bv.ox });
+const b2s = (x, y, side = S.side) => { const P = paneX(side); return [x * bv.scale * P.m + P.o, -y * bv.scale + bv.oy]; };
+// screen -> board; the third value is the side under that point
+const s2b = (sx, sy) => { const side = fly() ? (sx > bwrap.clientWidth / 2 ? "B" : "T") : S.side; const P = paneX(side); return [(sx - P.o) / (bv.scale * P.m), -(sy - bv.oy) / bv.scale, side]; };
+const viewW = () => (fly() ? bwrap.clientWidth / 2 : bwrap.clientWidth);
 export function fitBoard() {
-  const b = S.board; if (!b) return; const W = bwrap.clientWidth, H = bwrap.clientHeight; if (!W || !H) return;
+  const b = S.board; if (!b) return; const W = viewW(), H = bwrap.clientHeight; if (!W || !H) return;
   const e = b.ext, w = e[2] - e[0], h = e[3] - e[1];
-  bv.scale = bv.fit = Math.min(W / w, H / h) * 0.95;
+  bv.scale = bv.fit = Math.min(W / w, H / h) * (fly() ? 0.92 : 0.95);
   const cx = (e[0] + e[2]) / 2, cy = (e[1] + e[3]) / 2;
   bv.ox = W / 2 - cx * bv.scale * mir(); bv.oy = H / 2 + cy * bv.scale; reqB();
 }
+export function setButterfly(on) {
+  on = !!on; if (S.fly === on && S.board) { syncSideButtons(); return; }
+  S.fly = on; try { localStorage.setItem("tl.fly", on ? "1" : ""); } catch (e) {}
+  if (on) S.side = "T";
+  syncSideButtons(); fitBoard(); reqB();
+}
+function syncSideButtons() { const cur = fly() ? "X" : S.side; document.querySelectorAll("#sideSeg button").forEach((x) => x.setAttribute("aria-pressed", x.dataset.s === cur)); }
 function zoomBoardTo(bb, frac) {
-  const W = bwrap.clientWidth, H = bwrap.clientHeight; if (!W || !H) return;
+  const W = viewW(), H = bwrap.clientHeight; if (!W || !H) return;
   const minS = S.board.span * 0.03;
   const w = Math.max(bb[2] - bb[0], minS), h = Math.max(bb[3] - bb[1], minS);
   bv.scale = Math.min(Math.min(W / w, H / h) * frac, bv.fit * 400);
@@ -310,17 +325,18 @@ function zoomBoardTo(bb, frac) {
   bv.ox = W / 2 - cx * bv.scale * mir(); bv.oy = H / 2 + cy * bv.scale; reqB();
 }
 export function setSide(s, keep = true) {
+  if (s === "X") { setButterfly(true); return; }
+  if (fly()) { if (keep === false) return; S.fly = false; try { localStorage.setItem("tl.fly", ""); } catch (e) {} S.side = s; syncSideButtons(); fitBoard(); return; }
   if (s === S.side) return;
   const W = bwrap.clientWidth, H = bwrap.clientHeight; const c = s2b(W / 2, H / 2);
   S.side = s; if (keep) bv.ox = W / 2 - c[0] * bv.scale * mir();
-  document.querySelectorAll("#sideSeg button").forEach((x) => x.setAttribute("aria-pressed", x.dataset.s === s));
-  reqB();
+  syncSideButtons(); reqB();
 }
 export function focusBoardOn(type, name) {
   const b = S.board; if (!b) return;
   if (type === "net") {
     const all = b.nets.get(name) || []; if (!all.length || b.gnd.has(name)) return;
-    let on = all.filter((i) => vis(b, b.pins[i], S.side)); if (!on.length) { setSide(S.side === "T" ? "B" : "T", false); on = all; }
+    let on = fly() ? all : all.filter((i) => vis(b, b.pins[i], S.side)); if (!on.length) { setSide(S.side === "T" ? "B" : "T", false); on = all; }
     let bb = [Infinity, Infinity, -Infinity, -Infinity]; on.forEach((i) => { const p = b.pins[i]; bb = [Math.min(bb[0], p.x), Math.min(bb[1], p.y), Math.max(bb[2], p.x), Math.max(bb[3], p.y)]; });
     zoomBoardTo(bb, 0.7);
   } else if (type === "part") {
@@ -339,9 +355,18 @@ function drawBoard() {
   const [W, H, d] = sizeCanvas(bc, bwrap); if (!W || !H) return;
   const ctx = bc.getContext("2d"); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = T.bg; ctx.fillRect(0, 0, bc.width, bc.height);
   const b = S.board; if (!b) { canvasMsg(ctx, W, H, d, ["No boardview loaded", "Open a boardview, or drop it here"]); return; }
-  const sc = bv.scale, mm = mir(), px = 1 / sc, side = S.side;
-  ctx.setTransform(d * sc * mm, 0, 0, -d * sc, d * bv.ox, d * bv.oy);
-  const a = s2b(0, 0), z = s2b(W, H); const vx0 = Math.min(a[0], z[0]), vx1 = Math.max(a[0], z[0]), vy0 = Math.min(a[1], z[1]), vy1 = Math.max(a[1], z[1]);
+  if (!fly()) { drawSide(ctx, b, S.side, 0, W, H, d, true); return; }
+  const h = W / 2;
+  for (const [side, x0] of [["T", 0], ["B", h]]) { ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.beginPath(); ctx.rect(x0 * d, 0, h * d, H * d); ctx.clip(); drawSide(ctx, b, side, x0, h, H, d, false); ctx.restore(); }
+  ctx.setTransform(d, 0, 0, d, 0, 0); ctx.strokeStyle = T.edge; ctx.globalAlpha = 0.5; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(Math.round(h) + 0.5, 0); ctx.lineTo(Math.round(h) + 0.5, H); ctx.stroke(); ctx.globalAlpha = 1;
+}
+// drawSide draws one side of the board into the pane that starts at screen x px0 and is pw wide.
+function drawSide(ctx, b, side, px0, pw, H, d, single) {
+  const sc = bv.scale, P = paneX(side), px = 1 / sc, mm = P.m;
+  const b2s = (x, y) => [x * sc * mm + P.o, -y * sc + bv.oy];
+  const s2b = (sx, sy) => [(sx - P.o) / (sc * mm), -(sy - bv.oy) / sc];
+  ctx.setTransform(d * sc * mm, 0, 0, -d * sc, d * P.o, d * bv.oy);
+  const a = s2b(px0, 0), z = s2b(px0 + pw, H); const vx0 = Math.min(a[0], z[0]), vx1 = Math.max(a[0], z[0]), vy0 = Math.min(a[1], z[1]), vy1 = Math.max(a[1], z[1]);
   // board outline (all loops, even-odd so cutouts show)
   ctx.beginPath();
   for (const poly of b.outline) { poly.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath(); }
@@ -373,9 +398,9 @@ function drawBoard() {
   ctx.globalAlpha = S.sel ? 0.42 : 1; ctx.fillStyle = T.gnd; ctx.fill(pGnd); ctx.fillStyle = T.pin; ctx.fill(pDef); ctx.globalAlpha = 1;
   if (selPart >= 0) { ctx.fillStyle = T.pin; ctx.fill(pSelPart); }
   for (const [ci, path] of pHl) { ctx.fillStyle = T.nets[ci]; ctx.fill(path); }
-  // highlighted pins that live on the other side
+  // highlighted pins that live on the other side (butterfly mode shows them in the other half)
   ctx.lineWidth = 1.3 * px; ctx.setLineDash([3 * px, 2 * px]);
-  for (const [net, ci] of S.hl) {
+  if (single) for (const [net, ci] of S.hl) {
     const arr = b.nets.get(net); if (!arr || arr.length > 3000) continue; const g = new Path2D(); let any = false;
     for (const pi of arr) { const p = b.pins[pi]; if (vis(b, p, side) || p.x < vx0 - 50 || p.x > vx1 + 50 || p.y < vy0 - 50 || p.y > vy1 + 50) continue; g.moveTo(p.x + p.rr, p.y); g.arc(p.x, p.y, p.rr, 0, Math.PI * 2); any = true; }
     if (any) { ctx.strokeStyle = T.nets[ci]; ctx.globalAlpha = 0.6; ctx.stroke(g); ctx.globalAlpha = 1; }
@@ -396,7 +421,9 @@ function drawBoard() {
     ctx.font = `600 ${fs}px ${FONT_MONO}`; ctx.fillStyle = i === selPart ? T.sel : T.label; ctx.globalAlpha = S.sel && i !== selPart ? 0.75 : 1;
     ctx.fillText(p.name, (x0 + x1) / 2, (y0 + y1) / 2); ctx.globalAlpha = 1;
   }
-  ctx.textAlign = "left"; ctx.font = "600 11px " + FONT_UI; ctx.fillStyle = T.muted; ctx.fillText(side === "B" ? "BOTTOM · MIRRORED" : "TOP", 10, H - 12);
+  ctx.textAlign = "left"; ctx.font = "600 11px " + FONT_UI; const lbl = side === "B" ? "BOTTOM · MIRRORED" : "TOP";
+  if (!single) { ctx.fillStyle = T.bg; ctx.globalAlpha = 0.85; ctx.fillRect(px0 + 4, H - 24, ctx.measureText(lbl).width + 12, 20); ctx.globalAlpha = 1; }
+  ctx.fillStyle = T.muted; ctx.fillText(lbl, px0 + 10, H - 12);
 }
 
 function drawCopper(ctx, b, side, px) {
@@ -425,12 +452,12 @@ function drawCopper(ctx, b, side, px) {
   }
 }
 // Nearest visible trace to a board point (for clicking a trace to select its net).
-function hitTrace(x, y, tol) {
+function hitTrace(x, y, tol, side = S.side) {
   const b = S.board; if (!b || !b.layerInfo || !S.copper.traces) return null; let best = null, bd = Infinity;
   for (const t of b.traces) {
     if (!t.net) continue; const L = b.layerInfo.get(t.layer); if (!L || L.off) continue;
     const dx = t.x2 - t.x1, dy = t.y2 - t.y1, l2 = dx * dx + dy * dy; let u = l2 ? ((x - t.x1) * dx + (y - t.y1) * dy) / l2 : 0; u = Math.max(0, Math.min(1, u));
-    const d = Math.hypot(x - (t.x1 + u * dx), y - (t.y1 + u * dy)) - t.w / 2 + (L.side === S.side ? 0 : tol * 0.5);
+    const d = Math.hypot(x - (t.x1 + u * dx), y - (t.y1 + u * dy)) - t.w / 2 + (L.side === side ? 0 : tol * 0.5);
     if (d < bd) { bd = d; best = t; }
   }
   return bd <= tol ? best : null;
@@ -785,7 +812,7 @@ export function renderInspector() {
       <li>Click a net name or designator in the schematic to find it on the board.</li>
       <li>Subnets follow a net through resistors, inductors, ferrites, fuses and jumpers.</li>
       <li>Log diode-mode, voltage and resistance readings on any net. Flux, the repair assistant, uses them.</li>
-      <li><span class="kbd">/</span> search · <span class="kbd">B</span> flip side · <span class="kbd">F</span> fit · <span class="kbd">A</span> Flux · <span class="kbd">Esc</span> clear</li></ol></div>
+      <li><span class="kbd">/</span> search · <span class="kbd">B</span> flip side · <span class="kbd">Y</span> butterfly · <span class="kbd">F</span> fit · <span class="kbd">A</span> Flux · <span class="kbd">Esc</span> clear</li></ol></div>
       <div class="sec"><h3>Boardview formats</h3><ul class="fmtlist">${FORMATS.map(([n, e]) => `<li><b>${esc(e)}</b> ${esc(n)}</li>`).join("")}</ul></div>`;
     if (b && !b.sample) h += `<p class="foot">${esc(b.name)} · ${esc(b.format)} · ${b.parts.length} parts · ${b.nets.size} nets</p>`;
   } else if (sel.type === "net") {
@@ -878,7 +905,7 @@ function interact(canvas, apiH) {
   canvas.addEventListener("pointerdown", (e) => { canvas.setPointerCapture(e.pointerId); const [x, y] = pos(e); pts.set(e.pointerId, { x, y }); if (pts.size === 1) moved = 0;
     if (pts.size === 2) { const [a, b] = [...pts.values()]; pinch = Math.hypot(a.x - b.x, a.y - b.y); } apiH.leave(); });
   canvas.addEventListener("pointermove", (e) => { const [x, y] = pos(e); const p = pts.get(e.pointerId); if (!p) { apiH.hover(x, y); return; }
-    if (pts.size === 1) { apiH.pan(x - p.x, y - p.y); moved += Math.abs(x - p.x) + Math.abs(y - p.y); }
+    if (pts.size === 1) { apiH.pan(x - p.x, y - p.y, x); moved += Math.abs(x - p.x) + Math.abs(y - p.y); }
     else if (pts.size === 2) { p.x = x; p.y = y; const [a, b] = [...pts.values()]; const dd = Math.hypot(a.x - b.x, a.y - b.y); if (pinch > 0) apiH.zoom(dd / pinch, (a.x + b.x) / 2, (a.y + b.y) / 2); pinch = dd; moved += 10; return; }
     p.x = x; p.y = y; });
   const up = (e) => { const had = pts.has(e.pointerId); pts.delete(e.pointerId); if (had && pts.size === 0 && moved < 5 && e.type === "pointerup") { const [x, y] = pos(e); apiH.click(x, y, e); } };
@@ -888,19 +915,20 @@ function interact(canvas, apiH) {
 }
 function showTip(tip, wrap, x, y, html) { if (!html) { tip.hidden = true; return; } tip.innerHTML = html; tip.hidden = false; const W = wrap.clientWidth; const tw = tip.offsetWidth; tip.style.left = Math.max(4, Math.min(x + 14, W - tw - 6)) + "px"; tip.style.top = Math.max(4, y - 34) + "px"; }
 interact(bc, {
-  pan(dx, dy) { bv.ox += dx; bv.oy += dy; reqB(); },
-  zoom(f, x, y) { if (!S.board) return; const ns = Math.max(bv.fit * 0.3, Math.min(bv.fit * 600, bv.scale * f)); f = ns / bv.scale; bv.scale = ns; bv.ox = x - (x - bv.ox) * f; bv.oy = y - (y - bv.oy) * f; reqB(); },
+  pan(dx, dy, x) { bv.ox += fly() && x > bwrap.clientWidth / 2 ? -dx : dx; bv.oy += dy; reqB(); },
+  zoom(f, x, y) { if (!S.board) return; if (fly() && x > bwrap.clientWidth / 2) x = bwrap.clientWidth - x; const ns = Math.max(bv.fit * 0.3, Math.min(bv.fit * 600, bv.scale * f)); f = ns / bv.scale; bv.scale = ns; bv.ox = x - (x - bv.ox) * f; bv.oy = y - (y - bv.oy) * f; reqB(); },
   click(x, y, e) {
-    const b = S.board; if (!b) return; const [wx, wy] = s2b(x, y); const pi = hitPin(wx, wy, 5 / bv.scale);
+    const b = S.board; if (!b) return; const [wx, wy, sd] = s2b(x, y); const pi = hitPin(wx, wy, 5 / bv.scale, sd);
+    if (fly()) S.side = sd;
     if (pi >= 0 && !e.shiftKey) { const p = b.pins[pi]; if (p.net) { select({ type: "net", name: p.net }, { focusBoard: false, pin: pi }); return; } select({ type: "part", name: b.parts[p.part].name }, { focusBoard: false }); return; }
-    const pt = pi >= 0 ? b.pins[pi].part : hitPart(wx, wy); if (pt >= 0) { select({ type: "part", name: b.parts[pt].name }, { focusBoard: false }); return; }
-    const tr = hitTrace(wx, wy, 4 / bv.scale); if (tr) select({ type: "net", name: tr.net }, { focusBoard: false });
+    const pt = pi >= 0 ? b.pins[pi].part : hitPart(wx, wy, sd); if (pt >= 0) { select({ type: "part", name: b.parts[pt].name }, { focusBoard: false }); return; }
+    const tr = hitTrace(wx, wy, 4 / bv.scale, sd); if (tr) select({ type: "net", name: tr.net }, { focusBoard: false });
   },
   hover(x, y) {
-    const b = S.board; if (!b) return; const [wx, wy] = s2b(x, y); const pi = hitPin(wx, wy, 5 / bv.scale);
+    const b = S.board; if (!b) return; const [wx, wy, sd] = s2b(x, y); const pi = hitPin(wx, wy, 5 / bv.scale, sd);
     if (pi >= 0) { const p = b.pins[pi]; const pt = b.parts[p.part]; bc.style.cursor = "pointer"; showTip(btip, bwrap, x, y, `<b>${esc(pt.name)}</b><span>.${esc(p.num)}</span> ${p.net ? esc(p.net) : "<span>no net</span>"}${pt.desc ? ` <span>· ${esc(pt.desc)}</span>` : ""}`); return; }
-    const pt = hitPart(wx, wy);
-    if (pt < 0) { const tr = hitTrace(wx, wy, 3 / bv.scale); if (tr) { const L = b.layerInfo.get(tr.layer); bc.style.cursor = "pointer"; showTip(btip, bwrap, x, y, `<b>${esc(tr.net)}</b> <span>· trace on ${esc(L ? L.name : tr.layer)} · ${(tr.w * 0.0254).toFixed(3)} mm wide</span>`); return; } }
+    const pt = hitPart(wx, wy, sd);
+    if (pt < 0) { const tr = hitTrace(wx, wy, 3 / bv.scale, sd); if (tr) { const L = b.layerInfo.get(tr.layer); bc.style.cursor = "pointer"; showTip(btip, bwrap, x, y, `<b>${esc(tr.net)}</b> <span>· trace on ${esc(L ? L.name : tr.layer)} · ${(tr.w * 0.0254).toFixed(3)} mm wide</span>`); return; } }
     bc.style.cursor = pt >= 0 ? "pointer" : "crosshair"; showTip(btip, bwrap, x, y, pt >= 0 ? `<b>${esc(b.parts[pt].name)}</b> <span>${b.parts[pt].pins.length} pins${b.parts[pt].desc ? " · " + esc(b.parts[pt].desc) : ""}</span>` : "");
   },
   leave() { btip.hidden = true; },
@@ -985,7 +1013,7 @@ function showMenu(name) {
   // reflect live state as checkmarks
   d.querySelectorAll("[data-cmd]").forEach((b) => b.removeAttribute("aria-checked"));
   const chk = (cmd, on) => { const b = d.querySelector(`[data-cmd="${cmd}"]`); if (b) b.setAttribute("aria-checked", on ? "true" : "false"); };
-  if (name === "view") { chk("split-side", splitDir === "side"); chk("split-stack", splitDir === "stack"); chk("view-split", S.layout === "split"); chk("view-board", S.layout === "board"); chk("view-sch", S.layout === "sch"); chk("side-top", S.side === "T"); chk("side-bottom", S.side === "B"); chk("airwires", S.airwires); const m = config.theme_mode || "system"; $("#themeMenu").innerHTML = THEMES.map((t) => `<button role="menuitem" data-cmd="theme" data-id="${t.id}" aria-checked="${t.id === m}">${esc(t.name)}</button>`).join(""); }
+  if (name === "view") { chk("split-side", splitDir === "side"); chk("split-stack", splitDir === "stack"); chk("view-split", S.layout === "split"); chk("view-board", S.layout === "board"); chk("view-sch", S.layout === "sch"); chk("side-top", !fly() && S.side === "T"); chk("side-bottom", !fly() && S.side === "B"); chk("side-fly", fly()); chk("airwires", S.airwires); const m = config.theme_mode || "system"; $("#themeMenu").innerHTML = THEMES.map((t) => `<button role="menuitem" data-cmd="theme" data-id="${t.id}" aria-checked="${t.id === m}">${esc(t.name)}</button>`).join(""); }
   if (name === "assistant") chk("ai-toggle", !$("#aiPane").hidden);
   if (name === "file") fillRecentMenu();
   if (name === "bench" && app.bench) { $("#benchMenu").innerHTML = app.bench.menuItems().map((i) => `<button role="menuitem" data-cmd="bench-show" data-id="${esc(i.id)}" aria-checked="${i.show}">${esc(i.name)}<span class="acc">${esc(i.status)}</span></button>`).join("") || `<div class="mlabel" style="text-transform:none;letter-spacing:0">No instruments yet</div>`; chk("bench-bar", app.bench.barOn); }
@@ -1001,7 +1029,7 @@ const MENU_CMDS = {
   "view-split": () => doLayout("split"), "view-board": () => doLayout("board"), "view-sch": () => doLayout("sch"),
   "split-side": () => setSplitDir("side", true), "split-stack": () => setSplitDir("stack", true),
   "open-db": () => openDbDialog(), tutorial: () => startTour(),
-  "side-top": () => setSide("T"), "side-bottom": () => setSide("B"), fit: () => { fitBoard(); fitSch(); },
+  "side-top": () => setSide("T"), "side-bottom": () => setSide("B"), "side-fly": () => setButterfly(!fly()), fit: () => { fitBoard(); fitSch(); },
   airwires: () => { const a = $("#airw"); a.checked = !a.checked; a.dispatchEvent(new Event("change")); },
   theme: (b) => saveTheme(b.dataset.id), settings: () => openSettings(),
   "ai-toggle": () => toggleAI(), "ai-new": () => $("#aiNew").click(), "ai-ask": () => app.assistant && app.assistant.askAboutSelection(),
@@ -1036,7 +1064,8 @@ document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === "/") { e.preventDefault(); q.focus(); }
   else if (e.key === "Escape") { if (openMenu) closeMenus(); else select(null); }
-  else if (e.key === "b" || e.key === "B") setSide(S.side === "T" ? "B" : "T");
+  else if (e.key === "b" || e.key === "B") { if (!fly()) setSide(S.side === "T" ? "B" : "T"); }
+  else if (e.key === "y" || e.key === "Y") setButterfly(!fly());
   else if (e.key === "f" || e.key === "F") { fitBoard(); fitSch(); }
   else if (e.key === "a" || e.key === "A") toggleAI();
   else if (e.key === "PageDown") gotoPage(sv.page + 1);
@@ -1051,7 +1080,7 @@ function setBoard(b) {
   S.board = b; if (S.sch && S.sch.sample && !b.sample) { S.sch = null; resetSR(); updatePageSel(); $("#schName").textContent = ""; }
   $("#boardName").textContent = $("#boardName").title = boardLabel(b); renderLayersButton();
   S.airwires = !b.layerInfo; $("#airw").checked = S.airwires; // real traces make airwires redundant
-  S.side = "T"; document.querySelectorAll("#sideSeg button").forEach((x) => x.setAttribute("aria-pressed", x.dataset.s === "T"));
+  S.side = "T"; syncSideButtons();
   lastErr = null; select(null); fitBoard(); loadReadings();
   boardListeners.forEach((f) => { try { f(b); } catch (e) {} });
 }
@@ -1809,9 +1838,9 @@ $("#sCheck").addEventListener("click", async () => {
 /* ---------------- exported app API (used by the assistant) ---------------- */
 export const app = {
   S, sv, config, api, hasBackend, select, selectByName, searchAll, expand, isSeries, sortedHits, getReadings, renderRegion,
-  focusBoardOn, focusSchOn, gotoPage, setLayout, setSide, openSettings, reqB, reqS, onSelect, onBoardChange, esc, PROVIDERS, applyAppearance,
+  focusBoardOn, focusSchOn, gotoPage, setLayout, setSide, setButterfly, isButterfly, openSettings, reqB, reqS, onSelect, onBoardChange, esc, PROVIDERS, applyAppearance,
   startTour, openDbDialog, setSplitDir, openLocalAI, openLibrary, refreshModelPicker, get splitDir() { return splitDir; }, saveReadingFor, toast, toggleAI, openRecent, bench: null,
-  boardToScreen(x, y) { const r = bc.getBoundingClientRect(); const [sx, sy] = b2s(x, y); return [r.left + sx, r.top + sy]; },
+  boardToScreen(x, y, side) { const r = bc.getBoundingClientRect(); const [sx, sy] = b2s(x, y, side || S.side); return [r.left + sx, r.top + sy]; },
   captureBoard(maxW = 1400) {
     drawBoard(); const W = bc.width, H = bc.height; const s = Math.min(1, maxW / W); const c = document.createElement("canvas");
     c.width = Math.round(W * s); c.height = Math.round(H * s); c.getContext("2d").drawImage(bc, 0, 0, c.width, c.height); return c;
