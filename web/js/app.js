@@ -69,10 +69,28 @@ export function finalizeBoard(b) {
     let r = isFinite(md) ? md * 0.38 : span * 0.0025;
     r = Math.max(rMin, Math.min(r, rMax));
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    ps.forEach((p) => { const rr = p.r > 0 ? Math.max(rMin, Math.min(p.r, r * 1.6, rMax)) : r; p.rr = rr; x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); });
+    const real = n > 0 && ps.every((p) => p.real && p.r > 0);
+    if (real) {
+      // the file gives each pad's real shape and size: draw those, and box the part tightly around them
+      let minR = Infinity;
+      ps.forEach((p) => {
+        p.rr = Math.max(span * 0.00005, p.r); minR = Math.min(minR, p.rr);
+        if (p.poly) p.poly.forEach(([x, y]) => { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); });
+        else { x0 = Math.min(x0, p.x - p.rr); y0 = Math.min(y0, p.y - p.rr); x1 = Math.max(x1, p.x + p.rr); y1 = Math.max(y1, p.y + p.rr); }
+      });
+      const pad = Math.max(span * 0.0002, minR * 0.5); pt.bb = [x0 - pad, y0 - pad, x1 + pad, y1 + pad];
+      return;
+    }
+    ps.forEach((p) => { delete p.poly; const rr = p.r > 0 ? Math.max(rMin, Math.min(p.r, r * 1.6, rMax)) : r; p.rr = rr; x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); });
     const pad = r * 1.7; pt.bb = [x0 - pad, y0 - pad, x1 + pad, y1 + pad];
   });
-  if (!(b.outline && b.outline.length)) { const m = span * 0.02; b.outline = [[[ex[0] - m, ex[1] - m], [ex[2] + m, ex[1] - m], [ex[2] + m, ex[3] + m], [ex[0] - m, ex[3] + m]]]; b.synthOutline = true; }
+  if (!(b.outline && b.outline.length)) {
+    // No outline in the file: estimate one from where the parts and mounting holes are (holes off the board are panel tooling holes).
+    const est = estimateOutline(b, span);
+    if (est) { b.outline = est.polys; b.estOutline = true; b.dims = est.dims; if (b.holes) b.holes = b.holes.filter((h) => est.polys.some((q) => inPoly(q, h.x, h.y))); est.polys.forEach((poly) => poly.forEach(([x, y]) => { ex = [Math.min(ex[0], x), Math.min(ex[1], y), Math.max(ex[2], x), Math.max(ex[3], y)]; })); }
+    else { const m = span * 0.02; b.outline = [[[ex[0] - m, ex[1] - m], [ex[2] + m, ex[1] - m], [ex[2] + m, ex[3] + m], [ex[0] - m, ex[3] + m]]]; }
+    b.synthOutline = true;
+  }
   b.ext = [ex[0] - span * 0.03, ex[1] - span * 0.03, ex[2] + span * 0.03, ex[3] + span * 0.03];
   b.span = span; b.cell = Math.max(span / 120, 1e-6);
   b.partByName = new Map(); b.parts.forEach((p, i) => { const k = p.name.toUpperCase(); if (!b.partByName.has(k)) b.partByName.set(k, i); });
@@ -82,6 +100,80 @@ export function finalizeBoard(b) {
   if (!b.synthOutline) { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; b.outline.forEach((poly) => poly.forEach(([x, y]) => { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); })); b.dims = { w: x1 - x0, h: y1 - y0 }; }
   if (b.traces && b.traces.length) buildCopper(b);
   return b;
+}
+// estimateOutline traces the shape the parts and mounting holes cover: rasterize them, close the gaps
+// between parts, fill enclosed areas, grow by a small edge margin, then trace and simplify the border.
+export function estimateOutline(b, span) {
+  const items = [];
+  b.parts.forEach((pt) => { if (!pt.nail && pt.bb) items.push(pt.bb); });
+  (b.holes || []).forEach((h) => items.push([h.x - h.r, h.y - h.r, h.x + h.r, h.y + h.r]));
+  if (items.length < 8) return null;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  items.forEach((q) => { x0 = Math.min(x0, q[0]); y0 = Math.min(y0, q[1]); x1 = Math.max(x1, q[2]); y1 = Math.max(y1, q[3]); });
+  const g = span / 260, R = Math.max(3, Math.round(span * 0.03 / g)), M = Math.max(1, Math.round(span * 0.005 / g)), P = R + M + 3;
+  const W = Math.ceil((x1 - x0) / g) + 2 * P, H = Math.ceil((y1 - y0) / g) + 2 * P;
+  if (W * H > 4e6) return null;
+  const ox = x0 - P * g, oy = y0 - P * g, grid = new Uint8Array(W * H);
+  for (const q of items) {
+    const i0 = Math.floor((q[0] - ox) / g), i1 = Math.floor((q[2] - ox) / g), j0 = Math.floor((q[1] - oy) / g), j1 = Math.floor((q[3] - oy) / g);
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) grid[j * W + i] = 1;
+  }
+  // chamfer distance (in cells) to the nearest set / unset cell
+  const dist = (src, want) => {
+    const d = new Float32Array(W * H); const BIG = 1e9;
+    for (let k = 0; k < W * H; k++) d[k] = src[k] === want ? 0 : BIG;
+    const D1 = 1, D2 = Math.SQRT2;
+    for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) { const k = j * W + i; let v = d[k]; if (!v) continue; if (i) v = Math.min(v, d[k - 1] + D1); if (j) { v = Math.min(v, d[k - W] + D1); if (i) v = Math.min(v, d[k - W - 1] + D2); if (i < W - 1) v = Math.min(v, d[k - W + 1] + D2); } d[k] = v; }
+    for (let j = H - 1; j >= 0; j--) for (let i = W - 1; i >= 0; i--) { const k = j * W + i; let v = d[k]; if (!v) continue; if (i < W - 1) v = Math.min(v, d[k + 1] + D1); if (j < H - 1) { v = Math.min(v, d[k + W] + D1); if (i < W - 1) v = Math.min(v, d[k + W + 1] + D2); if (i) v = Math.min(v, d[k + W - 1] + D2); } d[k] = v; }
+    return d;
+  };
+  const dIn = dist(grid, 1), grown = new Uint8Array(W * H);
+  for (let k = 0; k < W * H; k++) grown[k] = dIn[k] <= R + M ? 1 : 0;
+  const dOut = dist(grown, 0), m = new Uint8Array(W * H);
+  for (let k = 0; k < W * H; k++) m[k] = dOut[k] > R ? 1 : 0;
+  // fill enclosed holes: anything unset that the outside can't reach
+  const outside = new Uint8Array(W * H), st = [];
+  for (let i = 0; i < W; i++) st.push(i, (H - 1) * W + i); for (let j = 0; j < H; j++) st.push(j * W, j * W + W - 1);
+  while (st.length) { const k = st.pop(); if (outside[k] || m[k]) continue; outside[k] = 1; const i = k % W, j = (k / W) | 0; if (i) st.push(k - 1); if (i < W - 1) st.push(k + 1); if (j) st.push(k - W); if (j < H - 1) st.push(k + W); }
+  for (let k = 0; k < W * H; k++) if (!outside[k]) m[k] = 1;
+  // trace cell borders into loops (filled area on the left of each directed edge)
+  const at = (i, j) => (i >= 0 && j >= 0 && i < W && j < H ? m[j * W + i] : 0);
+  const next = new Map(), key = (i, j) => j * (W + 1) + i;
+  for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+    if (!m[j * W + i]) continue;
+    if (!at(i, j - 1)) next.set(key(i, j), key(i + 1, j));
+    if (!at(i + 1, j)) next.set(key(i + 1, j), key(i + 1, j + 1));
+    if (!at(i, j + 1)) next.set(key(i + 1, j + 1), key(i, j + 1));
+    if (!at(i - 1, j)) next.set(key(i, j + 1), key(i, j));
+  }
+  const loops = [];
+  while (next.size) {
+    const [s0] = next.keys(); const loop = []; let k = s0, guard = 0;
+    while (next.has(k) && guard++ < 1e6) { loop.push([k % (W + 1), Math.floor(k / (W + 1))]); const n = next.get(k); next.delete(k); k = n; }
+    if (loop.length > 8) loops.push(loop);
+  }
+  if (!loops.length) return null;
+  const area = (l) => { let a = 0; for (let i = 0; i < l.length; i++) { const p = l[i], q = l[(i + 1) % l.length]; a += p[0] * q[1] - q[0] * p[1]; } return a / 2; };
+  loops.sort((a, b2) => Math.abs(area(b2)) - Math.abs(area(a)));
+  const big = Math.abs(area(loops[0]));
+  const polys = loops.filter((l) => Math.abs(area(l)) > big * 0.04).map((l) => simplifyClosed(l, 1.2).map(([i, j]) => [ox + i * g, oy + j * g]));
+  let a0 = Infinity, b0 = Infinity, a1 = -Infinity, b1 = -Infinity;
+  polys.forEach((poly) => poly.forEach(([x, y]) => { a0 = Math.min(a0, x); b0 = Math.min(b0, y); a1 = Math.max(a1, x); b1 = Math.max(b1, y); }));
+  return { polys, dims: { w: a1 - a0, h: b1 - b0 } };
+}
+function inPoly(q, x, y) { let c = false; for (let i = 0, j = q.length - 1; i < q.length; j = i++) if ((q[i][1] > y) !== (q[j][1] > y) && x < (q[j][0] - q[i][0]) * (y - q[i][1]) / (q[j][1] - q[i][1]) + q[i][0]) c = !c; return c; }
+function simplifyClosed(pts, tol) {
+  // Douglas-Peucker on a closed loop, split at the two points farthest apart
+  let far = 0, fd = -1; for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[0][0], pts[i][1] - pts[0][1]); if (d > fd) { fd = d; far = i; } }
+  const dp = (a) => {
+    if (a.length < 3) return a;
+    const [x1, y1] = a[0], [x2, y2] = a[a.length - 1], L = Math.hypot(x2 - x1, y2 - y1) || 1e-9; let mi = 0, md = -1;
+    for (let i = 1; i < a.length - 1; i++) { const d = Math.abs((x2 - x1) * (y1 - a[i][1]) - (x1 - a[i][0]) * (y2 - y1)) / L; if (d > md) { md = d; mi = i; } }
+    if (md <= tol) return [a[0], a[a.length - 1]];
+    const l = dp(a.slice(0, mi + 1)), r = dp(a.slice(mi)); return l.slice(0, -1).concat(r);
+  };
+  const A = dp(pts.slice(0, far + 1)), B = dp(pts.slice(far).concat([pts[0]]));
+  return A.slice(0, -1).concat(B.slice(0, -1));
 }
 // Copper (design-tool formats): one Path2D per layer and track width, plus per-net indexes for highlighting.
 const LAYER_COLORS = { T: "#e0703a", B: "#4b8ff0", I: ["#3fbf7a", "#d4b030", "#b07af0", "#30c0c0", "#ea6aa6", "#9aac3c", "#f09a50", "#7a9cf0"] };
@@ -119,7 +211,7 @@ function hitPin(x, y, tol) {
   const reach = Math.min(6, Math.max(1, Math.ceil(tol / C))); let best = -1, bd = Infinity;
   for (let i = -reach; i <= reach; i++) for (let j = -reach; j <= reach; j++) {
     const a = g.get((cx + i) + "," + (cy + j)); if (!a) continue;
-    for (const pi of a) { const p = b.pins[pi]; const d = Math.hypot(p.x - x, p.y - y); if (d <= Math.max(p.rr, tol) && d < bd) { bd = d; best = pi; } }
+    for (const pi of a) { const p = b.pins[pi]; const d = Math.hypot(p.x - x, p.y - y); if ((d <= Math.max(p.rr, tol) || (p.poly && inPoly(p.poly, x, y))) && d < bd) { bd = d; best = pi; } }
   }
   return best;
 }
@@ -254,6 +346,7 @@ function drawBoard() {
   ctx.beginPath();
   for (const poly of b.outline) { poly.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath(); }
   ctx.fillStyle = T.fill; ctx.fill("evenodd"); ctx.lineWidth = 1.5 * px; ctx.strokeStyle = T.edge; if (b.synthOutline) ctx.setLineDash([6 * px, 5 * px]); ctx.stroke(); ctx.setLineDash([]);
+  if (b.holes) { ctx.beginPath(); for (const h of b.holes) { ctx.moveTo(h.x + h.r, h.y); ctx.arc(h.x, h.y, h.r, 0, Math.PI * 2); } ctx.fillStyle = T.bg; ctx.fill(); ctx.lineWidth = 1.2 * px; ctx.strokeStyle = T.edge; ctx.stroke(); }
   if (b.layerInfo && S.copper.traces) drawCopper(ctx, b, side, px);
   // parts
   const selPart = S.sel && S.sel.type === "part" ? b.partByName.get(S.sel.name.toUpperCase()) : -1;
@@ -268,7 +361,7 @@ function drawBoard() {
   }
   // pins
   const pDef = new Path2D(), pGnd = new Path2D(), pHl = new Map(), pSelPart = new Path2D();
-  const addPin = (path, p) => { const r = p.rr; if (r * sc < 1.3) path.rect(p.x - r, p.y - r, 2 * r, 2 * r); else { path.moveTo(p.x + r, p.y); path.arc(p.x, p.y, r, 0, Math.PI * 2); } };
+  const addPin = (path, p) => { const r = p.rr; if (r * sc < 1.3) path.rect(p.x - r, p.y - r, 2 * r, 2 * r); else if (p.poly) { const q = p.poly; path.moveTo(q[0][0], q[0][1]); for (let k = 1; k < q.length; k++) path.lineTo(q[k][0], q[k][1]); path.closePath(); } else { path.moveTo(p.x + r, p.y); path.arc(p.x, p.y, r, 0, Math.PI * 2); } };
   for (const i of visParts) {
     for (const pi of b.parts[i].pins) {
       const p = b.pins[pi]; if (!vis(b, p, side)) continue; const ci = S.hl.get(p.net);
@@ -993,7 +1086,7 @@ export async function openSchBytes(bytes, name, meta = {}) {
 // "board.brd · Format · 412 parts · 380 nets · 158.4 × 92.1 mm (6.24 × 3.63 in)". The size comes from the
 // file's own outline; boards without one get a placeholder outline, so no size is claimed for them.
 function boardLabel(b) {
-  const d = b.dims ? ` · ${(b.dims.w * 0.0254).toFixed(1)} × ${(b.dims.h * 0.0254).toFixed(1)} mm (${(b.dims.w / 1000).toFixed(2)} × ${(b.dims.h / 1000).toFixed(2)} in)` : " · no outline in file";
+  const d = b.dims ? ` · ${b.estOutline ? "≈ " : ""}${(b.dims.w * 0.0254).toFixed(1)} × ${(b.dims.h * 0.0254).toFixed(1)} mm (${(b.dims.w / 1000).toFixed(2)} × ${(b.dims.h / 1000).toFixed(2)} in)${b.estOutline ? " · outline estimated (none in file)" : ""}` : " · no outline in file";
   return `${b.name} · ${b.format} · ${b.parts.length} parts · ${b.nets.size} nets${b.layerInfo ? ` · ${b.layerInfo.size} copper layers` : ""}${d}`;
 }
 

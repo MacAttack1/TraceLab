@@ -98,6 +98,7 @@ function finish(m, fname, format) {
   let outline = (m.outline || []).filter((poly) => poly && poly.length > 2);
   if (!outline.length && m.segments && m.segments.length) outline = chainSegments(m.segments);
   const out = { name: fname, format, parts: outParts, pins, outline, desc: m.desc || "" };
+  if (m.holes && m.holes.length) out.holes = m.holes.filter((h) => isFinite(h.x) && isFinite(h.y) && h.r > 0);
   if (m.traces && m.traces.length) {
     const clean = (n) => { n = String(n || "").trim(); return NC_RE.test(n) ? "" : n; };
     out.traces = m.traces.filter((t) => isFinite(t.x1) && isFinite(t.y1) && isFinite(t.x2) && isFinite(t.y2)).map((t) => ({ ...t, net: clean(t.net) }));
@@ -578,9 +579,10 @@ function parseGenCAD(t) {
   const segs = [], padstacks = new Map(), shapes = new Map(), comps = [], devices = new Map(), signals = new Map();
   let curPS = null, curShape = null, curComp = null, curDev = null, curSig = null;
   const trackW = new Map(), gTraces = [], gVias = [], rLayers = []; let rNet = "", rW = 8, rLayer = "";
+  const padDefs = new Map(), holes = []; let curPad = null;
   for (const raw of lines(t)) {
     const l = raw.trim(); if (!l) continue;
-    if (l[0] === "$") { sec = l.toUpperCase(); curPS = curShape = curComp = curDev = curSig = null; continue; }
+    if (l[0] === "$") { sec = l.toUpperCase(); curPS = curShape = curComp = curDev = curSig = curPad = null; continue; }
     const k = gTok(l); const kw = (k[0] || "").toUpperCase();
     if (sec === "$HEADER" && kw === "UNITS") {
       const u = (k[1] || "").toUpperCase(), n = +k[2] || 1;
@@ -591,13 +593,24 @@ function parseGenCAD(t) {
       else if (kw === "ARC" && v.length >= 6) { const [x1, y1, x2, y2, cx, cy] = v; const r = Math.hypot(x1 - cx, y1 - cy); let a0 = Math.atan2(y1 - cy, x1 - cx), a1 = Math.atan2(y2 - cy, x2 - cx); if (a1 <= a0) a1 += Math.PI * 2; segs.push(...arcSegs(cx, cy, r, a0, a1)); }
       else if (kw === "CIRCLE" && v.length >= 3) segs.push(...arcSegs(v[0], v[1], v[2], 0, Math.PI * 2, 24));
       else if (kw === "RECTANGLE" && v.length >= 4) { const [x, y, w, h] = v; segs.push([x, y, x + w, y], [x + w, y, x + w, y + h], [x + w, y + h, x, y + h], [x, y + h, x, y]); }
+    } else if (sec === "$PADS") {
+      // pad shapes: RECTANGLE x y w h | CIRCLE x y r | a closed LINE/ARC polygon
+      const v = k.slice(1).map(Number).map(conv);
+      if (kw === "PAD") { curPad = { pts: [] }; padDefs.set(k[1], curPad); }
+      else if (!curPad) continue;
+      else if (kw === "RECTANGLE" && v.length >= 4 && v[2] > 0 && v[3] > 0) { const [x, y, w, h] = v; curPad.pts = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]; curPad.half = Math.min(w, h) / 2; }
+      else if (kw === "CIRCLE" && v.length >= 3 && v[2] > 0) { curPad.circle = [v[0], v[1], v[2]]; curPad.half = v[2]; }
+      else if (kw === "LINE" && v.length >= 4) { if (!curPad.pts.length) curPad.pts.push([v[0], v[1]]); curPad.pts.push([v[2], v[3]]); }
+      else if (kw === "ARC" && v.length >= 6) { const [x1, y1, x2, y2, cx, cy] = v; const r = Math.hypot(x1 - cx, y1 - cy); let a0 = Math.atan2(y1 - cy, x1 - cx), a1 = Math.atan2(y2 - cy, x2 - cx); if (a1 <= a0) a1 += Math.PI * 2; if (!curPad.pts.length) curPad.pts.push([x1, y1]); arcSegs(cx, cy, r, a0, a1, 8).forEach(([, , x, y]) => curPad.pts.push([x, y])); }
+    } else if (sec === "$MECH") {
+      if (kw === "HOLE" && k.length >= 4) holes.push({ x: conv(+k[1]), y: conv(+k[2]), r: conv(+k[3]) / 2 });
     } else if (sec === "$PADSTACKS") {
-      if (kw === "PADSTACK") { curPS = { drill: +k[2] || 0, layers: new Set() }; padstacks.set(k[1], curPS); }
-      else if (kw === "PAD" && curPS) curPS.layers.add((k[2] || "").toUpperCase());
+      if (kw === "PADSTACK") { curPS = { drill: +k[2] || 0, layers: new Set(), cu: {} }; padstacks.set(k[1], curPS); }
+      else if (kw === "PAD" && curPS) { const ly = (k[2] || "").toUpperCase(); curPS.layers.add(ly); if (!curPS.cu[ly]) curPS.cu[ly] = { pad: k[1], rot: +k[3] || 0, mir: k[4] === "1" || /^MIRROR/i.test(k[4] || "") }; }
     } else if (sec === "$SHAPES") {
       if (kw === "SHAPE") { curShape = { pins: [], smd: true }; shapes.set(k[1], curShape); }
       else if (kw === "INSERT" && curShape) curShape.smd = !/^TH/i.test(k[1] || "");
-      else if (kw === "PIN" && curShape && k.length >= 5) curShape.pins.push({ name: k[1], pad: k[2], x: conv(+k[3]), y: conv(+k[4]), layer: (k[5] || "").toUpperCase() });
+      else if (kw === "PIN" && curShape && k.length >= 5) curShape.pins.push({ name: k[1], pad: k[2], x: conv(+k[3]), y: conv(+k[4]), layer: (k[5] || "").toUpperCase(), rot: +k[6] || 0, mir: k[7] === "1" || /^MIRROR/i.test(k[7] || "") });
     } else if (sec === "$COMPONENTS") {
       if (kw === "COMPONENT") { curComp = { name: k[1], x: 0, y: 0, rot: 0, side: "T", shape: "", mx: false, my: false, flip: false, dev: "" }; comps.push(curComp); }
       else if (!curComp) continue;
@@ -635,18 +648,37 @@ function parseGenCAD(t) {
     parts.push({ name: c.name, side: th ? "BOTH" : c.side, desc }); const pi = parts.length - 1;
     let rad = c.rot * Math.PI / 180; const sx = c.mx ? -1 : 1, sy = c.my ? -1 : 1; if (sx * sy === -1) rad = Math.PI - rad;
     const co = Math.cos(rad), si = Math.sin(rad);
+    const place = (lx, ly) => [c.x + sx * (lx * co - ly * si), c.y + sy * (lx * si + ly * co)];
     for (const p of sh.pins) {
-      const x = c.x + sx * (p.x * co - p.y * si), y = c.y + sy * (p.x * si + p.y * co);
+      const [x, y] = place(p.x, p.y);
+      const geo = padGeometry(padstacks.get(p.pad), padDefs, p, place);
       let side;
       const ps = padstacks.get(p.pad);
       if (ps && ps.layers.size) { const top = ps.layers.has("TOP"), bot = ps.layers.has("BOTTOM"), all = ps.layers.has("ALL") || ps.layers.has("INNER"); side = all || (top && bot) ? "BOTH" : top ? "T" : bot ? "B" : undefined; if (side && c.flip && side !== "BOTH") side = side === "T" ? "B" : "T"; }
       if (side === "T" && c.side === "B" && !c.flip) side = "B";
-      pins.push({ part: pi, num: p.name, x, y, net: signals.get(c.name + "\u0000" + p.name) || "", side: side === "BOTH" ? "BOTH" : undefined });
+      const pin = { part: pi, num: p.name, x, y, net: signals.get(c.name + "\u0000" + p.name) || "", side: side === "BOTH" ? "BOTH" : undefined };
+      if (geo) { pin.r = geo.r; pin.real = true; if (geo.poly) pin.poly = geo.poly; }
+      pins.push(pin);
     }
   }
   const lo = (l) => (l === "TOP" ? -1 : l === "BOTTOM" ? 999 : +(l.match(/\d+/) || [500])[0]);
   const layers = rLayers.slice().sort((a, b) => lo(a) - lo(b)).map((l) => ({ id: l, name: l[0] + l.slice(1).toLowerCase(), side: l === "TOP" ? "T" : l === "BOTTOM" ? "B" : "I" }));
-  return { parts, pins, segments: segs, traces: gTraces, vias: gVias, layers };
+  return { parts, pins, segments: segs, traces: gTraces, vias: gVias, layers, holes };
+}
+// The copper pad a GenCAD pin uses, placed on the board: { r } for a round pad, { r, poly } otherwise
+// (r is half the pad's narrow side, used for hit-testing and label sizing).
+function padGeometry(ps, padDefs, pin, place) {
+  if (!ps) return null;
+  const cu = ps.cu.TOP || ps.cu.ALL || ps.cu.BOTTOM || ps.cu.INNER || Object.values(ps.cu)[0];
+  const def = cu && padDefs.get(cu.pad); if (!def) return null;
+  if (def.half === undefined && def.pts.length > 2) { const xs = def.pts.map((q) => q[0]), ys = def.pts.map((q) => q[1]); def.half = Math.min(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) / 2; }
+  if (!(def.half > 0)) return null;
+  const a = (cu.rot + pin.rot) * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+  const local = ([x, y]) => { if (cu.mir) x = -x; let X = x * ca - y * sa, Y = x * sa + y * ca; if (pin.mir) X = -X; return place(pin.x + X, pin.y + Y); };
+  if (def.circle) return { r: def.circle[2] };
+  let pts = def.pts; if (pts.length > 2 && Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]) < 1e-6) pts = pts.slice(0, -1);
+  if (pts.length < 3) return null;
+  return { r: def.half, poly: pts.map(local) };
 }
 
 /* ============================================================ Altium ASCII */

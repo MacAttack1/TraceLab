@@ -29,7 +29,7 @@ const appName = "Trace Lab"
 const appID = "TraceLab" // folder, registry and user-agent name
 
 // Set at build time: -ldflags "-X main.appVersion=1.2.0 -X main.defaultUpdateRepo=owner/repo -X main.builtinFZKeyHex=<352 hex chars>"
-var appVersion = "1.6.1"
+var appVersion = "1.6.2"
 var defaultUpdateRepo = ""
 
 // builtinFZKeyHex is the ASUS FZ RC6 key as 44 concatenated 8-hex-digit words (352 chars), injected

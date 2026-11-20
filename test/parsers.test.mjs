@@ -83,6 +83,13 @@ if (typeof DOMParser !== "undefined") await t("Eagle copper", [{ name: "ec.brd",
   ok(b.traces.filter((x) => x.layer === 1)[0].net === "VCC", "eagle wire net"); ok(b.traces.filter((x) => x.layer === 16).length > 3, "eagle curve split");
   ok(b.vias.length === 1, "eagle via"); ok(b.zones.length === 1 && b.zones[0].net === "GND", "eagle polygon");
 });
+await t("GenCAD pads", [{ name: "gp.cad", bytes: enc(`$HEADER\nGENCAD 1.4\nUNITS USER 1000\n$ENDHEADER\n$BOARD\n$ENDBOARD\n$PADS\nPAD RECT1 RECTANGULAR -1\nRECTANGLE -20 -10 40 20\nPAD RND RECTANGULAR -1\nCIRCLE 0 0 15\n$ENDPADS\n$PADSTACKS\nPADSTACK PS1 0\nPAD RECT1 TOP 0 0\nPAD RECT1 SOLDERMASK_TOP 0 0\nPADSTACK PS2 0\nPAD RND TOP 0 0\n$ENDPADSTACKS\n$SHAPES\nSHAPE R\nINSERT SMD\nPIN 1 PS1 -50 0 TOP 0 0\nPIN 2 PS1 50 0 TOP 0 0\nSHAPE TP\nINSERT SMD\nPIN 1 PS2 0 0 TOP 0 0\n$ENDSHAPES\n$COMPONENTS\nCOMPONENT R1\nPLACE 1000 1000\nLAYER TOP\nROTATION 90\nSHAPE R 0 0\nCOMPONENT TP1\nPLACE 0 0\nLAYER TOP\nROTATION 0\nSHAPE TP 0 0\n$ENDCOMPONENTS\n$MECH\nHOLE 500 500 118\n$ENDMECH\n`) }], {}, (b) => {
+  const p = pinOf(b, "R1", "1"); ok(p.real && p.r === 10 && p.poly && p.poly.length === 4, "gencad rect pad");
+  const xs = p.poly.map((q) => q[0]), ys = p.poly.map((q) => q[1]);
+  ok(Math.abs(Math.max(...xs) - Math.min(...xs) - 20) < 1e-6 && Math.abs(Math.max(...ys) - Math.min(...ys) - 40) < 1e-6, "gencad pad rotates with part " + xs + " " + ys);
+  const tp = pinOf(b, "TP1", "1"); ok(tp.real && tp.r === 15 && !tp.poly, "gencad round pad");
+  ok(b.holes && b.holes.length === 1 && b.holes[0].r === 59, "gencad mech hole");
+});
 await t("GenCAD copper", [{ name: "gc.cad", bytes: enc(`$HEADER\nGENCAD 1.4\nUNITS MM\n$ENDHEADER\n$BOARD\nLINE 0 0 100 0\nLINE 100 0 100 50\nLINE 100 50 0 50\nLINE 0 50 0 0\n$ENDBOARD\n$PADSTACKS\nPADSTACK PS1 0\nPAD P1 TOP 0 0\nPADSTACK V1 0.3\nPAD P1 ALL 0 0\n$ENDPADSTACKS\n$SHAPES\nSHAPE R\nINSERT SMD\nPIN 1 PS1 -0.5 0 TOP 0 0\nPIN 2 PS1 0.5 0 TOP 0 0\n$ENDSHAPES\n$COMPONENTS\nCOMPONENT R1\nPLACE 10 10\nLAYER TOP\nROTATION 0\nSHAPE R 0 0\n$ENDCOMPONENTS\n$SIGNALS\nSIGNAL VCC\nNODE R1 1\n$ENDSIGNALS\n$TRACKS\nTRACK T10 0.254\n$ENDTRACKS\n$ROUTES\nROUTE VCC\nTRACK T10\nLAYER TOP\nLINE 9.5 10 5 10\nVIA V1 5 10 ALL -1\nLAYER BOTTOM\nLINE 5 10 5 20\n$ENDROUTES\n`) }], {}, (b) => {
   ok(b.layers.map((l) => l.id).join() === "TOP,BOTTOM", "gencad layers"); ok(b.traces.length === 2 && b.traces[0].net === "VCC" && Math.abs(b.traces[0].w - 10) < 0.01, "gencad track width " + (b.traces[0] || {}).w);
   ok(b.vias.length === 1, "gencad via");
